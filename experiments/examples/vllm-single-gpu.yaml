@@ -1,0 +1,35 @@
+# Illustrative schema example only; this is not directly runnable. The model,
+# revision, and workload profile below are placeholders.
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: vllm-single-gpu-example
+  labels:
+    workload: inference
+spec:
+  provider:
+    kind: aws
+    region: us-east-2
+    capacity: spot
+    instanceTypes:
+      - g6.xlarge
+  runtime:
+    kind: vllm
+    model: replace-with-public-model
+    revision: replace-with-exact-revision
+    arguments: []
+  workload:
+    profile: replace-with-versioned-profile
+    requests: 100
+    concurrency: 8
+  measurement:
+    warmupRuns: 1
+    repetitions: 5
+  budget:
+    maximumCostUsd: 5.00
+  lifecycle:
+    maximumRuntimeSeconds: 3600
+    destroyOnCompletion: true
+  artifacts:
+    public: false
+    format: benchplane-evidence/v1

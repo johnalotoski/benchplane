@@ -1,0 +1,6 @@
+{
+  "format": "benchplane-evidence/v1",
+  "runId": "local-fake-0001",
+  "experimentDigest": "sha256:844ad04ebf57f4b27156bac8268fcaeeb437a972af1555110bd408828c39289f",
+  "status": "complete"
+}

@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Experiment",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/ExperimentSpec"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "$defs": {
+    "ArtifactSpec": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "default": "benchplane-evidence/v1"
+        },
+        "public": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "AwsCapacity": {
+      "type": "string",
+      "enum": [
+        "spot",
+        "onDemand"
+      ]
+    },
+    "BudgetSpec": {
+      "type": "object",
+      "properties": {
+        "maximumCostUsd": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "maximumCostUsd"
+      ]
+    },
+    "ExperimentSpec": {
+      "type": "object",
+      "properties": {
+        "artifacts": {
+          "$ref": "#/$defs/ArtifactSpec",
+          "default": {
+            "format": "benchplane-evidence/v1",
+            "public": false
+          }
+        },
+        "budget": {
+          "$ref": "#/$defs/BudgetSpec"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleSpec",
+          "default": {
+            "destroyOnCompletion": true,
+            "maximumRuntimeSeconds": 3600
+          }
+        },
+        "measurement": {
+          "$ref": "#/$defs/MeasurementSpec",
+          "default": {
+            "repetitions": 3,
+            "warmupRuns": 1
+          }
+        },
+        "provider": {
+          "$ref": "#/$defs/ProviderSpec"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeSpec"
+        },
+        "workload": {
+          "$ref": "#/$defs/WorkloadSpec"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "runtime",
+        "workload",
+        "budget"
+      ]
+    },
+    "LifecycleSpec": {
+      "type": "object",
+      "properties": {
+        "destroyOnCompletion": {
+          "type": "boolean",
+          "default": true
+        },
+        "maximumRuntimeSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MeasurementSpec": {
+      "type": "object",
+      "properties": {
+        "repetitions": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "warmupRuns": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Metadata": {
+      "type": "object",
+      "properties": {
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "ProviderSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "localFake"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "capacity": {
+              "$ref": "#/$defs/AwsCapacity",
+              "default": "spot"
+            },
+            "instanceTypes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "aws"
+            },
+            "region": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "region",
+            "instanceTypes"
+          ]
+        }
+      ]
+    },
+    "RuntimeSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "localFake"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "arguments": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "vllm"
+            },
+            "model": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "model",
+            "revision"
+          ]
+        }
+      ]
+    },
+    "WorkloadSpec": {
+      "type": "object",
+      "properties": {
+        "concurrency": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "profile": {
+          "type": "string"
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "requests"
+      ]
+    }
+  }
+}

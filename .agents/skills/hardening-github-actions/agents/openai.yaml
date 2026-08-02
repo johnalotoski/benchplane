@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Actions Hardening"
+  short_description: "Secure GitHub Actions review and editing"
+  default_prompt: "Use $hardening-github-actions to threat-model and securely review this GitHub Actions change."

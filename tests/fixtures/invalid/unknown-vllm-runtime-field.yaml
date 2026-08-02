@@ -1,0 +1,17 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: unknown-vllm-runtime-field
+spec:
+  provider:
+    kind: localFake
+  runtime:
+    kind: vllm
+    model: public/model
+    revision: exact-revision
+    tensorParallelSize: 1
+  workload:
+    profile: deterministic-smoke
+    requests: 1
+  budget:
+    maximumCostUsd: 0

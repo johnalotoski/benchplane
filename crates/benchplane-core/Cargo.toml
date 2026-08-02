@@ -1,0 +1,16 @@
+[package]
+name = "benchplane-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+benchplane-schema = { path = "../benchplane-schema" }
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde-saphyr.workspace = true

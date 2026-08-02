@@ -1,0 +1,16 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: excessive-runtime
+spec:
+  provider:
+    kind: localFake
+  runtime:
+    kind: localFake
+  workload:
+    profile: deterministic-smoke
+    requests: 1
+  budget:
+    maximumCostUsd: 0.01
+  lifecycle:
+    maximumRuntimeSeconds: 86401

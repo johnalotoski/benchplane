@@ -1,0 +1,16 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: empty-aws-instance-types
+spec:
+  provider:
+    kind: aws
+    region: us-east-2
+    instanceTypes: []
+  runtime:
+    kind: localFake
+  workload:
+    profile: deterministic-smoke
+    requests: 1
+  budget:
+    maximumCostUsd: 0.01

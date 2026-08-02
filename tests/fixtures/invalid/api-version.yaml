@@ -1,0 +1,14 @@
+apiVersion: benchplane/v2
+kind: Experiment
+metadata:
+  name: invalid-api-version
+spec:
+  provider:
+    kind: localFake
+  runtime:
+    kind: localFake
+  workload:
+    profile: deterministic-smoke
+    requests: 1
+  budget:
+    maximumCostUsd: 0.01

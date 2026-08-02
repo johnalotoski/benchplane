@@ -1,0 +1,16 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: misspelled-lifecycle-key
+spec:
+  provider:
+    kind: localFake
+  runtime:
+    kind: localFake
+  workload:
+    profile: deterministic-smoke
+    requests: 1
+  budget:
+    maximumCostUsd: 0
+  lifecycle:
+    maximumRuntimeSecond: 60
