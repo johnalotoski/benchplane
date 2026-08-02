@@ -42,11 +42,12 @@ Complete a small, reviewable local vertical slice before implementing AWS provis
 
 ## Expected checks
 
-Run the strongest checks available in the environment:
+Use the supported Nix environment for Rust development and checks:
 
 ```console
+nix develop
 just fmt
 just check
 ```
 
-When Nix is unavailable, run the underlying Rust and static checks individually and clearly report what could not be executed.
+Commands may instead be invoked explicitly with `nix develop -c <command>`. Direct Cargo use outside the pinned Nix environment is currently best-effort; when Nix is unavailable, clearly report which supported checks could not be executed.

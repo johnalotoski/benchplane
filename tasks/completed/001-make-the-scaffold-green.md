@@ -2,6 +2,8 @@
 
 Status: completed for the bootstrap scaffold. This document is retained as the original acceptance checklist.
 
+Commands in this historical checklist are intended to run from the supported `nix develop` environment.
+
 ## Objective
 
 Turn the supplied starter scaffold into a clean first public commit without broadening scope.
@@ -11,7 +13,7 @@ Turn the supplied starter scaffold into a clean first public commit without broa
 1. Inspect `AGENTS.md`, the ADRs, and the complete repository before editing.
 2. Replace `OWNER` in Cargo metadata with the actual GitHub owner or remove the repository field until known.
 3. Restore the full canonical Apache-2.0 license text.
-4. Run `cargo generate-lockfile` and commit `Cargo.lock`.
+4. Run `nix develop -c cargo generate-lockfile` and commit `Cargo.lock`.
 5. Build, test, format, and lint the Rust workspace. Fix all compiler and Clippy issues rather than weakening checks.
 6. Verify the YAML enum representation used by both smoke examples.
 7. Generate `schemas/v1alpha1/experiment.schema.json` from the Rust types; remove the placeholder comment.

@@ -13,12 +13,15 @@ Benchplane is currently a design-first early-stage project.
 ## Required checks
 
 ```console
+nix develop
 just fmt
 just check
 just tofu-validate
 ```
 
 The first two commands are local and deterministic. `just tofu-validate` may download the locked provider, but it must not use AWS credentials, contact AWS APIs, run a plan, or create resources.
+
+The supported development, CI, and release environment is the Nix shell pinned by `flake.lock`. Commands may instead be run as `nix develop -c <command>`. Direct Cargo or rustup use outside that environment is currently best-effort.
 
 Cloud tests must be manually triggered, cost-bounded, and designed to tear down in an unconditional cleanup path.
 

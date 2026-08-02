@@ -78,7 +78,9 @@ just tofu-validate
 
 `just check` is deterministic and includes OpenTofu formatting, but not provider-backed semantic validation. `just tofu-validate` initializes the resource-free experiment root with its read-only provider lock file and may download the pinned provider; it does not run a plan or contact AWS APIs.
 
-Rust 1.82 is the tested minimum supported Rust version (MSRV). `rust-toolchain.toml` selects exactly Rust 1.82.0 for rustup-based development, while the Nix development shell and package deliberately use the compiler supplied by the pinned `nixpkgs` revision. Both toolchains must pass the workspace checks; the Nix compiler is reproducible through `flake.lock`, but it does not redefine the MSRV.
+The supported development, CI, and release environment is the Nix development shell pinned by `flake.lock`. Running Cargo directly outside that environment is currently best-effort.
+
+Benchplane does not currently promise a minimum supported Rust version (MSRV). An MSRV may be introduced for an individual crate when it has a real Cargo-only downstream consumer or is prepared for publication, and the claimed version can be continuously tested in CI.
 
 ## Design constraints
 
