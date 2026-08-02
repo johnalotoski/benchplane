@@ -30,6 +30,8 @@ pub enum EvidenceError {
     DuplicatePath(String),
     #[error("evidence path escapes the bundle root: {0}")]
     PathEscape(String),
+    #[error("evidence bundle root is not a directory: {0}")]
+    BundleRootNotDirectory(String),
     #[error("evidence payload is not a regular file: {0}")]
     NonRegularFile(String),
     #[error("SHA256SUMS must contain a checksum for manifest.json")]
@@ -104,7 +106,9 @@ fn canonical_bundle_root(root: &Path) -> Result<PathBuf, EvidenceError> {
         source,
     })?;
     if !metadata.is_dir() {
-        return Err(EvidenceError::NonRegularFile(root.display().to_string()));
+        return Err(EvidenceError::BundleRootNotDirectory(
+            root.display().to_string(),
+        ));
     }
     Ok(canonical)
 }
@@ -257,6 +261,18 @@ mod tests {
     fn verifies_the_checked_in_fixture() {
         let manifest = verify_evidence_bundle(&fixture_root()).expect("fixture should verify");
         assert_eq!(manifest.format, EVIDENCE_FORMAT_V1);
+    }
+
+    #[test]
+    fn rejects_non_directory_bundle_root() {
+        let directory = TestDirectory::new("non-directory-root");
+        let root = directory.path.join("bundle");
+        fs::write(&root, b"not a directory\n").expect("write bundle root file");
+
+        assert!(matches!(
+            verify_evidence_bundle(&root),
+            Err(EvidenceError::BundleRootNotDirectory(path)) if path == root.display().to_string()
+        ));
     }
 
     #[test]
