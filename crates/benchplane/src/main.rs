@@ -184,7 +184,15 @@ fn run_command(path: &PathBuf, output_root: PathBuf, json: bool) -> u8 {
             result_exit_code(&result)
         }
         Err(error) => {
-            eprintln!("error: {error}");
+            if let benchplane_core::RunError::Resolution(ResolutionError::Validation(errors)) =
+                &error
+            {
+                for validation_error in errors {
+                    eprintln!("error: {validation_error}");
+                }
+            } else {
+                eprintln!("error: {error}");
+            }
             if error.is_request_rejection() {
                 EXIT_REJECTED
             } else if error.is_finalization_failure() {

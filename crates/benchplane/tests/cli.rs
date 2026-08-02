@@ -230,7 +230,7 @@ fn schema_export_matches_the_checked_in_schema() {
 
 #[test]
 fn evidence_verify_accepts_fixture_and_detects_tampering() {
-    let source = fixture("evidence/local-fake");
+    let source = fixture("evidence/run-018f6f9a-7b3c-7abc-8def-0123456789ab");
     let verified = benchplane(&[
         "evidence",
         "verify",
@@ -246,7 +246,9 @@ fn evidence_verify_accepts_fixture_and_detects_tampering() {
         .contains("run=run-018f6f9a-7b3c-7abc-8def-0123456789ab status=succeeded validity=valid"));
 
     let temporary = TestDirectory::new("evidence-tamper");
-    let tampered = temporary.path.join("bundle");
+    let tampered = temporary
+        .path
+        .join("run-018f6f9a-7b3c-7abc-8def-0123456789ab");
     copy_directory(&source, &tampered);
     fs::write(tampered.join("summary.json"), b"{}\n").expect("tamper with summary");
 
@@ -314,6 +316,30 @@ fn run_json_output_is_one_object_with_no_stdout_diagnostics() {
     assert_eq!(result["sampleCount"], 3);
     let bundle = Path::new(result["bundlePath"].as_str().expect("bundle path"));
     assert!(bundle.is_dir());
+}
+
+#[test]
+fn run_rejects_excessive_local_fake_work_before_allocation() {
+    let directory = TestDirectory::new("excessive-work");
+    let experiment = directory.path.join("experiment.yaml");
+    let output_root = directory.path.join("output");
+    fs::write(
+        &experiment,
+        "apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: excessive }\nspec:\n  provider: { kind: localFake }\n  runtime: { kind: localFake }\n  workload: { profile: smoke, requests: 1 }\n  measurement: { warmupRuns: 10000, repetitions: 1 }\n  budget: { maximumCostUsd: 0 }\n",
+    )
+    .expect("write experiment");
+    let output = benchplane(&[
+        "run",
+        experiment.to_str().expect("UTF-8 experiment path"),
+        "--output-root",
+        output_root.to_str().expect("UTF-8 output root"),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(output_text(&output.stderr)
+        .contains("runtime.localFake total generated records must not exceed 10000"));
+    assert!(!output_root.exists());
 }
 
 #[test]
