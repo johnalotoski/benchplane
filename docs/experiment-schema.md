@@ -24,11 +24,29 @@ runtime:
 
 The sum of `measurement.warmupRuns` and `measurement.repetitions` must not exceed 10,000 for the local-fake runtime. Benchplane performs this semantic check with overflow-safe arithmetic before allocating a run ID. The bound limits CPU, memory, and disk work; `maximumRuntimeSeconds` is not an execution guard for the synchronous fake runtime.
 
+## Local CPU-probe controls
+
+The measured local combination is provider `local` with runtime `cpuProbe`, and it supports exactly the `cpu-token-probe-v1` workload profile:
+
+```yaml
+provider: { kind: local }
+runtime:
+  kind: cpuProbe
+  outputTokens: 8
+  workUnitsPerToken: 256
+workload:
+  profile: cpu-token-probe-v1
+  requests: 2
+  concurrency: 1
+```
+
+`outputTokens` is 1–4,096 and `workUnitsPerToken` is 1–1,000,000. Only concurrency `1` is implemented. Warmups plus repetitions may not exceed 10,000, and their checked product with requests, output tokens, and work units may not overflow or exceed 100,000,000 work units. Positive requests and repetitions, the exact profile, these bounds, and a finite nonnegative local budget are validated before run allocation.
+
 ## Structural and semantic restrictions
 
 The generated JSON Schema expresses the document structure, required properties, primitive types, tagged provider/runtime variants, defaults, and closed objects. Unknown properties are rejected at the top level and at each nested object or tagged-variant boundary. `metadata.labels` is intentionally an open string-to-string map.
 
-Benchplane semantic validation applies restrictions that are awkward or misleading to express in the generated schema alone. These include supported `apiVersion` and artifact-format values, nonempty names and provider/workload/runtime identities, positive requests and repetitions, the local-fake 10,000-record work bound, the lifecycle upper bound, and provider-specific budget rules. A `localFake` budget may be zero; an AWS budget must be finite and greater than zero.
+Benchplane semantic validation applies restrictions that are awkward or misleading to express in the generated schema alone. These include supported `apiVersion` and artifact-format values, nonempty names and identities, positive requests and repetitions, local execution work bounds and compatibility, the lifecycle upper bound, and provider-specific budget rules. `localFake` and `local` budgets may be zero; an AWS budget must be finite and greater than zero.
 
 Consumers must not treat JSON Schema acceptance as a substitute for `benchplane validate`.
 
@@ -41,3 +59,5 @@ This representation is deterministic for this implementation, but it is not a st
 ## Resolved-plan digest
 
 `resolvedPlanDigest` is SHA-256 over deterministic `serde_json` serialization of the resolved-plan content: API version, kind, fully parsed/defaulted experiment, and `experimentDigest`. The `resolvedPlanDigest` field itself is excluded from its input. Both digests are stored in the resolved plan, run record, evidence manifest, summary, and terminal CLI result.
+
+CPU-probe plan identity is deterministic, but its monotonic-clock measurements are observations and intentionally vary between executions and hosts.

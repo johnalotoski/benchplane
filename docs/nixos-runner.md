@@ -1,6 +1,6 @@
 # NixOS runner service
 
-The Benchplane NixOS module runs the existing public `benchplane run EXPERIMENT` command inside a systemd oneshot. It proves an execution envelope for the local-fake lifecycle; it is not a daemon or a controller-to-runner transport.
+The Benchplane NixOS module runs the existing public `benchplane run EXPERIMENT` command inside a systemd oneshot. It exercises both local execution implementations, including the package-owned CPU-probe child; it is not a daemon or a controller-to-runner transport.
 
 ## Configuration
 
@@ -38,14 +38,14 @@ The relevant options are:
 |---|---|
 | `services.benchplane.enable` | Creates the unprivileged service account and enables shared module configuration. |
 | `services.benchplane.runner.enable` | Defines `benchplane-runner.service`. |
-| `services.benchplane.runner.package` | Required package containing `bin/benchplane`; the unit uses its absolute Nix store path. |
+| `services.benchplane.runner.package` | Required package containing `bin/benchplane` and its sibling CPU-probe helper; the unit uses its absolute Nix store path. |
 | `services.benchplane.runner.experimentFile` | Required read-only experiment path copied to the Nix store. |
 | `services.benchplane.lifecycle.maximumRuntimeSeconds` | Positive activation timeout, at most 86,400 seconds; defaults to 3,600. |
 | `services.benchplane.stateDirectory` | One safe `StateDirectory` component; defaults to `benchplane`. |
 
 The existing `user`, `group`, and `stateDirectory` names remain configurable for module composition, but each accepts only a restricted single-component value. The standard configuration uses the `benchplane` system user and group and `/var/lib/benchplane`.
 
-The example binds the selected package once: the service invokes that package by absolute Nix store path, while `environment.systemPackages` makes the same CLI available to operators. An experiment passed as a Nix path enters the Nix store. Never put credentials or secrets in that file. This local-fake configuration needs none.
+The example binds the selected package once: the service invokes that package by absolute Nix store path, while `environment.systemPackages` makes the same CLI available to operators. An experiment passed as a Nix path enters the Nix store. Never put credentials or secrets in that file. Local-fake and CPU-probe configurations need none.
 
 ## Operation
 
@@ -97,7 +97,7 @@ Systemd preserves the Benchplane process status. It does not reinterpret nonzero
 
 ## Runtime limit and security boundary
 
-`maximumRuntimeSeconds` configures `TimeoutStartSec`, the systemd timeout that bounds a oneshot while its `ExecStart` is activating. This watchdog may terminate Benchplane forcibly. Benchplane does not yet implement operating-system signal handling, so a timeout is not a graceful `interrupted` lifecycle outcome: it may leave diagnostic staging data and may produce no final bundle.
+For CPU-probe experiments, the experiment's resolved lifecycle maximum is an inner child deadline: Benchplane kills and reaps an overdue helper and can finalize failed evidence. The module's `maximumRuntimeSeconds` separately configures `TimeoutStartSec`, the outer systemd timeout that bounds the entire oneshot while `ExecStart` is activating. Configure the outer timeout comfortably above the inner deadline. The outer watchdog may terminate Benchplane forcibly; without parent signal handling it is not a graceful `interrupted` lifecycle outcome and may leave diagnostic staging data without a final bundle.
 
 The service runs as a static, unprivileged system account because the existing NixOS capability modules share that identity. Systemd owns the persistent state directory with mode `0750`; the process receives a `0027` umask and no writable home. The module also applies a conservative hardening baseline described in the [security model](security-model.md).
 
@@ -111,7 +111,7 @@ Run the focused cost-free NixOS VM integration test with local compute:
 just nixos-runner-test
 ```
 
-The test is also part of `nix flake check`. It builds its own local-fake experiment into the store, boots one NixOS VM, explicitly starts the service, verifies the published bundle with the packaged binary, and checks identity, ownership, status, counts, digests, checksums, and empty staging state. It requires no cloud account, AWS API access, GPU, model download, container runtime, or external runtime service; after its Nix closure is available, the VM uses no external network access.
+The test is also part of `nix flake check`. It builds its own small CPU-probe experiment into the store, boots one NixOS VM, explicitly starts the service, verifies the published bundle with the packaged binary, and checks identity, ownership, status, counts, generator identity, positive timing/throughput relationships, digests, checksums, and empty staging state. It uses semantic assertions rather than performance thresholds. It requires no cloud account, AWS API access, GPU, model download, container runtime, or external runtime service; after its Nix closure is available, the VM uses no external network access.
 
 The flake declares and evaluates this check for `x86_64-linux` and `aarch64-linux`, but declaration or successful evaluation alone does not mean a VM was executed. The primary CI job executes the flake checks on `x86_64-linux`; a separate `NixOS runner VM (aarch64)` job builds `checks.aarch64-linux.nixos-runner-vm` on GitHub's native `ubuntu-24.04-arm` runner. The test uses KVM when it is available but permits same-architecture QEMU system emulation when it is not; this changes execution speed, not the packaged binary, guest architecture, or assertions. This establishes native CI coverage for this NixOS runner VM test on those two architectures, not broader ARM support for Benchplane. `just nixos-runner-test` selects and runs only the current host system's check; validation reports should still name the exact architecture on which each VM test actually ran.
 

@@ -183,6 +183,19 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "local"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "capacity": {
               "$ref": "#/$defs/AwsCapacity",
               "default": "spot"
@@ -233,6 +246,33 @@
           "additionalProperties": false,
           "required": [
             "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cpuProbe"
+            },
+            "outputTokens": {
+              "type": "integer",
+              "format": "uint32",
+              "maximum": 4096,
+              "minimum": 1
+            },
+            "workUnitsPerToken": {
+              "type": "integer",
+              "format": "uint32",
+              "maximum": 1000000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "outputTokens",
+            "workUnitsPerToken"
           ]
         },
         {

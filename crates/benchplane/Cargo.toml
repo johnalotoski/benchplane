@@ -4,10 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+default-run = "benchplane"
 
 [[bin]]
 name = "benchplane"
 path = "src/main.rs"
+
+[[bin]]
+name = "benchplane-cpu-probe"
+path = "src/bin/benchplane-cpu-probe.rs"
 
 [dependencies]
 benchplane-core = { path = "../benchplane-core" }

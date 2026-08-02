@@ -24,6 +24,8 @@ The manifest records typed run and validity statuses, run ID, experiment and res
 
 Evidence format v1 contains exactly one attempt, so `attemptCount` must equal `1`. The `attempts/` directory is a stable ownership boundary, not a promise that retries exist. Future retry support requires an evidence-format evolution or an explicitly reviewed relaxation of this invariant.
 
+For `benchplane-cpu-probe/v1`, each warmup or measured repetition contributes one aggregate `MeasurementRecord`. `latencyMicros` is mean completed-request latency, `timeToFirstTokenMicros` is mean first-output latency, `throughputMilliRequestsPerSecond` is successful requests divided by repetition wall time, and request counts report completed and failed requests. Summary latency and throughput continue to use only measured, non-warmup records; evidence-v1 gains no TTFT summary field. These timings are observed and nondeterministic even though the resolved plan and workload computation are deterministic.
+
 ## Finalization and publication
 
 Benchplane writes under `<output-root>/staging/<run-id>`, persists the terminal event and snapshots, writes finalization-only records, rejects symlinks and unsupported file types, writes checksums through `SHA256SUMS.tmp`, and verifies the complete staging bundle with the public verifier. Only then does it atomically rename the directory to `<output-root>/runs/<run-id>` on the same filesystem.

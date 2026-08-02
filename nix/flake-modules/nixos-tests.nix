@@ -15,14 +15,15 @@
           name: nixos-runner-smoke
         spec:
           provider:
-            kind: localFake
+            kind: local
           runtime:
-            kind: localFake
-            seed: 42
-            scenario: success
+            kind: cpuProbe
+            outputTokens: 4
+            workUnitsPerToken: 64
           workload:
-            profile: nixos-runner-smoke
-            requests: 8
+            profile: cpu-token-probe-v1
+            requests: 2
+            concurrency: 1
           measurement:
             warmupRuns: 1
             repetitions: 3
@@ -177,9 +178,18 @@
                   f"cat {shlex.quote(run_directory + '/attempts/0001/measurements.jsonl')}"
               ).splitlines()
               assert len(measurements) == 4
-              phases = [json.loads(line)["phase"] for line in measurements]
+              records = [json.loads(line) for line in measurements]
+              phases = [record["phase"] for record in records]
               assert phases.count("warmup") == 1
               assert phases.count("measured") == 3
+              for record in records:
+                  assert record["generator"] == "benchplane-cpu-probe/v1"
+                  assert record["latencyMicros"] > 0
+                  assert record["timeToFirstTokenMicros"] > 0
+                  assert record["timeToFirstTokenMicros"] <= record["latencyMicros"]
+                  assert record["throughputMilliRequestsPerSecond"] > 0
+                  assert record["successfulRequests"] == 2
+                  assert record["failedRequests"] == 0
 
               machine.fail(
                   "find /var/lib/benchplane/staging -mindepth 1 -maxdepth 1 -type d | grep ."

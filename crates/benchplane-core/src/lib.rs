@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod cpu_probe;
 pub mod evidence;
+mod execution;
 mod lifecycle;
 mod local_fake;
 mod parsing;

@@ -92,6 +92,7 @@ fn run_scenario(scenario: &str, json: bool) -> (TestDirectory, Output) {
 fn validate_accepts_both_tagged_yaml_examples() {
     for relative in [
         "experiments/smoke/local-fake.yaml",
+        "experiments/smoke/local-cpu-probe.yaml",
         "experiments/examples/vllm-single-gpu.yaml",
     ] {
         let path = repository_root().join(relative);
@@ -102,6 +103,55 @@ fn validate_accepts_both_tagged_yaml_examples() {
             output_text(&output.stderr)
         );
     }
+}
+
+#[test]
+fn cpu_probe_runs_through_public_cli_and_publishes_observed_measurements() {
+    let directory = TestDirectory::new("cpu-probe");
+    let experiment = repository_root().join("experiments/smoke/local-cpu-probe.yaml");
+    let output_root = directory.path.join("output");
+    let output = benchplane(&[
+        "run",
+        experiment.to_str().expect("UTF-8 experiment path"),
+        "--output-root",
+        output_root.to_str().expect("UTF-8 output root"),
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        output_text(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("run result JSON");
+    assert_eq!(result["runState"], "succeeded");
+    assert_eq!(result["validityStatus"], "valid");
+    let bundle = Path::new(result["bundlePath"].as_str().expect("bundle path"));
+    let records: Vec<Value> = fs::read_to_string(bundle.join("attempts/0001/measurements.jsonl"))
+        .expect("measurements")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("measurement JSON"))
+        .collect();
+    assert_eq!(records.len(), 4);
+    for record in records {
+        assert_eq!(record["generator"], "benchplane-cpu-probe/v1");
+        let latency = record["latencyMicros"].as_u64().unwrap();
+        let ttft = record["timeToFirstTokenMicros"].as_u64().unwrap();
+        assert!(latency > 0 && ttft > 0 && ttft <= latency);
+        assert!(record["throughputMilliRequestsPerSecond"].as_u64().unwrap() > 0);
+        assert_eq!(record["successfulRequests"], 2);
+        assert_eq!(record["failedRequests"], 0);
+    }
+    let verified = benchplane(&[
+        "evidence",
+        "verify",
+        bundle.to_str().expect("UTF-8 bundle path"),
+    ]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        output_text(&verified.stderr)
+    );
 }
 
 #[test]

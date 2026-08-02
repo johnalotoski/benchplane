@@ -1,0 +1,26 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: local-cpu-probe-smoke
+spec:
+  provider:
+    kind: local
+  runtime:
+    kind: cpuProbe
+    outputTokens: 8
+    workUnitsPerToken: 256
+  workload:
+    profile: cpu-token-probe-v1
+    requests: 2
+    concurrency: 1
+  measurement:
+    warmupRuns: 1
+    repetitions: 3
+  budget:
+    maximumCostUsd: 0
+  lifecycle:
+    maximumRuntimeSeconds: 30
+    destroyOnCompletion: true
+  artifacts:
+    public: false
+    format: benchplane-evidence/v1

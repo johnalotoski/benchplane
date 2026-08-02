@@ -10,7 +10,7 @@ fmt:
 fmt-check:
     treefmt --fail-on-change
 
-check: fmt-check schema-check local-smoke
+check: fmt-check schema-check local-smoke cpu-probe-smoke
     actionlint
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo test --workspace --all-features
@@ -24,6 +24,21 @@ local-smoke:
       bundle="$(jq -er '.bundlePath' "$smoke_dir/result.json")"; \
       jq -e '.runState == "succeeded" and .validityStatus == "valid"' \
         "$smoke_dir/result.json" > /dev/null; \
+      cargo run --quiet -p benchplane -- evidence verify "$bundle" > /dev/null
+
+cpu-probe-smoke:
+    smoke_dir="$(mktemp -d)"; trap 'rm -rf "$smoke_dir"' EXIT; \
+      cargo build --quiet -p benchplane --bins; \
+      cargo run --quiet -p benchplane -- run experiments/smoke/local-cpu-probe.yaml \
+        --output-root "$smoke_dir/output" --json > "$smoke_dir/result.json"; \
+      bundle="$(jq -er '.bundlePath' "$smoke_dir/result.json")"; \
+      jq -e '.runState == "succeeded" and .validityStatus == "valid"' \
+        "$smoke_dir/result.json" > /dev/null; \
+      jq -e -s 'length == 4 and all(.generator == "benchplane-cpu-probe/v1") \
+        and all(.latencyMicros > 0 and .timeToFirstTokenMicros > 0 \
+          and .timeToFirstTokenMicros <= .latencyMicros \
+          and .throughputMilliRequestsPerSecond > 0)' \
+        "$bundle/attempts/0001/measurements.jsonl" > /dev/null; \
       cargo run --quiet -p benchplane -- evidence verify "$bundle" > /dev/null
 
 nixos-runner-test:
