@@ -12,14 +12,19 @@ Import `nixosModules.default` and configure a secret-free experiment path:
   pkgs,
   ...
 }:
+let
+  benchplanePackage = inputs.benchplane.packages.${pkgs.system}.default;
+in
 {
   imports = [ inputs.benchplane.nixosModules.default ];
+
+  environment.systemPackages = [ benchplanePackage ];
 
   services.benchplane = {
     enable = true;
     runner = {
       enable = true;
-      package = inputs.benchplane.packages.${pkgs.system}.default;
+      package = benchplanePackage;
       experimentFile = ./experiment.yaml;
     };
     lifecycle.maximumRuntimeSeconds = 300;
@@ -40,7 +45,7 @@ The relevant options are:
 
 The existing `user`, `group`, and `stateDirectory` names remain configurable for module composition, but each accepts only a restricted single-component value. The standard configuration uses the `benchplane` system user and group and `/var/lib/benchplane`.
 
-An experiment passed as a Nix path enters the Nix store. Never put credentials or secrets in that file. This local-fake configuration needs none.
+The example binds the selected package once: the service invokes that package by absolute Nix store path, while `environment.systemPackages` makes the same CLI available to operators. An experiment passed as a Nix path enters the Nix store. Never put credentials or secrets in that file. This local-fake configuration needs none.
 
 ## Operation
 
@@ -72,8 +77,10 @@ Successful bundles are published beneath:
 Verify one with the same packaged CLI:
 
 ```console
-benchplane evidence verify /var/lib/benchplane/runs/<run-id>
+sudo benchplane evidence verify /var/lib/benchplane/runs/<run-id>
 ```
+
+Administrative access is required because the managed state directory and published run directories are deliberately mode `0750` and owned by the Benchplane service identity. Do not weaken those permissions for interactive verification.
 
 While a run is active, or after some process/finalization failures, diagnostic data may exist beneath `/var/lib/benchplane/staging/<run-id>`. A staging directory is not finalized evidence and must not be uploaded, cited, or treated as a successful run.
 
@@ -105,3 +112,5 @@ just nixos-runner-test
 ```
 
 The test is also part of `nix flake check`. It builds its own local-fake experiment into the store, boots one NixOS VM, explicitly starts the service, verifies the published bundle with the packaged binary, and checks identity, ownership, status, counts, digests, checksums, and empty staging state. It requires no cloud account, AWS API access, GPU, model download, container runtime, or external runtime service; after its Nix closure is available, the VM uses no external network access.
+
+The flake defines this check for each declared flake system, but an output being defined or successfully evaluated does not mean its VM was executed. `just nixos-runner-test` selects and runs only the current host system's check; validation reports should name the exact architecture on which each VM test actually ran.

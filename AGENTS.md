@@ -11,7 +11,7 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 Keep the cost-free, self-contained NixOS runner-service milestone small and reviewable. Exercise the completed local-fake lifecycle through the public CLI in a real NixOS/systemd envelope that:
 
 1. runs as an unprivileged system identity;
-2. writes only beneath a systemd-managed persistent state directory;
+2. writes persistent runner state and evidence beneath a systemd-managed state directory;
 3. starts only after an explicit operator request and preserves CLI exit status;
 4. bounds oneshot activation with a process watchdog;
 5. is proven by a NixOS VM check using only local compute resources and no cloud account, GPU, or external runtime service.

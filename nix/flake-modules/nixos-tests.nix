@@ -80,6 +80,12 @@
               assert machine.succeed(
                   "systemctl show benchplane-runner.service --property=StateDirectory --value"
               ).strip() == "benchplane"
+              assert machine.succeed(
+                  "systemctl show benchplane-runner.service --property=TimeoutStartUSec --value"
+              ).strip() == "5min"
+              assert machine.succeed(
+                  "systemctl show benchplane-runner.service --property=Restart --value"
+              ).strip() == "no"
 
           with subtest("runner is unprivileged and conservatively hardened"):
               runner_uid = machine.succeed("id -u benchplane").strip()
@@ -158,8 +164,9 @@
               assert validity["observedSamples"] == 3
               assert summary["attemptCount"] == 1
               assert summary["sampleCount"] == 3
-              assert manifest["experimentDigest"].startswith("sha256:")
-              assert manifest["resolvedPlanDigest"].startswith("sha256:")
+              digest_pattern = r"sha256:[0-9a-f]{64}"
+              assert re.fullmatch(digest_pattern, manifest["experimentDigest"])
+              assert re.fullmatch(digest_pattern, manifest["resolvedPlanDigest"])
               machine.succeed(f"test -s {shlex.quote(run_directory + '/SHA256SUMS')}")
 
               measurements = machine.succeed(
