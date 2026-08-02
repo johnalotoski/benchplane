@@ -1,0 +1,298 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Experiment",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/definitions/Metadata"
+    },
+    "spec": {
+      "$ref": "#/definitions/ExperimentSpec"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ArtifactSpec": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "default": "benchplane-evidence/v1",
+          "type": "string"
+        },
+        "public": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AwsCapacity": {
+      "type": "string",
+      "enum": [
+        "spot",
+        "onDemand"
+      ]
+    },
+    "BudgetSpec": {
+      "type": "object",
+      "required": [
+        "maximumCostUsd"
+      ],
+      "properties": {
+        "maximumCostUsd": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExperimentSpec": {
+      "type": "object",
+      "required": [
+        "budget",
+        "provider",
+        "runtime",
+        "workload"
+      ],
+      "properties": {
+        "artifacts": {
+          "default": {
+            "format": "benchplane-evidence/v1",
+            "public": false
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ArtifactSpec"
+            }
+          ]
+        },
+        "budget": {
+          "$ref": "#/definitions/BudgetSpec"
+        },
+        "lifecycle": {
+          "default": {
+            "destroyOnCompletion": true,
+            "maximumRuntimeSeconds": 3600
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/LifecycleSpec"
+            }
+          ]
+        },
+        "measurement": {
+          "default": {
+            "repetitions": 3,
+            "warmupRuns": 1
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/MeasurementSpec"
+            }
+          ]
+        },
+        "provider": {
+          "$ref": "#/definitions/ProviderSpec"
+        },
+        "runtime": {
+          "$ref": "#/definitions/RuntimeSpec"
+        },
+        "workload": {
+          "$ref": "#/definitions/WorkloadSpec"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LifecycleSpec": {
+      "type": "object",
+      "properties": {
+        "destroyOnCompletion": {
+          "default": true,
+          "type": "boolean"
+        },
+        "maximumRuntimeSeconds": {
+          "default": 3600,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MeasurementSpec": {
+      "type": "object",
+      "properties": {
+        "repetitions": {
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "warmupRuns": {
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Metadata": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "labels": {
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProviderSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "localFake"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "instanceTypes",
+            "kind",
+            "region"
+          ],
+          "properties": {
+            "capacity": {
+              "default": "spot",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/AwsCapacity"
+                }
+              ]
+            },
+            "instanceTypes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "aws"
+              ]
+            },
+            "region": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "RuntimeSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "localFake"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "model",
+            "revision"
+          ],
+          "properties": {
+            "arguments": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "vllm"
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "WorkloadSpec": {
+      "type": "object",
+      "required": [
+        "profile",
+        "requests"
+      ],
+      "properties": {
+        "concurrency": {
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "profile": {
+          "type": "string"
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

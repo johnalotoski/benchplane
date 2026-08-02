@@ -1,0 +1,20 @@
+[package]
+name = "benchplane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "benchplane"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+benchplane-core = { path = "../benchplane-core" }
+benchplane-schema = { path = "../benchplane-schema" }
+clap.workspace = true
+schemars.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true

@@ -1,0 +1,26 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: local-fake-smoke
+  labels:
+    purpose: smoke
+spec:
+  provider:
+    kind: localFake
+  runtime:
+    kind: localFake
+  workload:
+    profile: deterministic-smoke
+    requests: 32
+    concurrency: 4
+  measurement:
+    warmupRuns: 1
+    repetitions: 3
+  budget:
+    maximumCostUsd: 0.01
+  lifecycle:
+    maximumRuntimeSeconds: 60
+    destroyOnCompletion: true
+  artifacts:
+    public: false
+    format: benchplane-evidence/v1

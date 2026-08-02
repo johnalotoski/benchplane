@@ -1,0 +1,18 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: unknown-aws-provider-field
+spec:
+  provider:
+    kind: aws
+    region: us-east-2
+    instanceTypes:
+      - g6.xlarge
+    availabilityZone: us-east-2a
+  runtime:
+    kind: localFake
+  workload:
+    profile: deterministic-smoke
+    requests: 1
+  budget:
+    maximumCostUsd: 1
