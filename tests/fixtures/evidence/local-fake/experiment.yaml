@@ -1,0 +1,19 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: test
+spec:
+  provider:
+    kind: localFake
+  runtime:
+    kind: localFake
+    seed: 42
+    scenario: success
+  workload:
+    profile: smoke
+    requests: 8
+  measurement:
+    warmupRuns: 1
+    repetitions: 3
+  budget:
+    maximumCostUsd: 0

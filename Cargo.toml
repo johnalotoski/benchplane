@@ -13,7 +13,10 @@ license = "Apache-2.0"
 repository = "https://github.com/johnalotoski/benchplane"
 
 [workspace.dependencies]
-anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "std",
+] }
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
 schemars = "1.2"
@@ -24,3 +27,4 @@ serde-saphyr = { version = "1.0", default-features = false, features = [
 ] }
 sha2 = "0.10"
 thiserror = "2.0"
+uuid = { version = "1.18", features = ["v7"] }

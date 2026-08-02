@@ -1,0 +1,6 @@
+{"sequence":1,"recordedAt":"2026-01-02T03:04:05.006Z","fromState":null,"toState":"created","attemptNumber":1,"failure":null}
+{"sequence":2,"recordedAt":"2026-01-02T03:04:05.006Z","fromState":"created","toState":"preparing","attemptNumber":1,"failure":null}
+{"sequence":3,"recordedAt":"2026-01-02T03:04:05.006Z","fromState":"preparing","toState":"running","attemptNumber":1,"failure":null}
+{"sequence":4,"recordedAt":"2026-01-02T03:04:05.006Z","fromState":"running","toState":"collecting","attemptNumber":1,"failure":null}
+{"sequence":5,"recordedAt":"2026-01-02T03:04:05.006Z","fromState":"collecting","toState":"finalizing","attemptNumber":1,"failure":null}
+{"sequence":6,"recordedAt":"2026-01-02T03:04:05.006Z","fromState":"finalizing","toState":"succeeded","attemptNumber":1,"failure":null}

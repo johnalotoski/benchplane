@@ -7,9 +7,11 @@ repository.workspace = true
 
 [dependencies]
 benchplane-schema = { path = "../benchplane-schema" }
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true
 sha2.workspace = true
 hex.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
