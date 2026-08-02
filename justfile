@@ -30,6 +30,10 @@ nixos-runner-test:
     system="$(nix eval --impure --raw --expr builtins.currentSystem)"; \
       nix build ".#checks.$system.nixos-runner-vm" --print-build-logs
 
+nixos-runner-interactive:
+    system="$(nix eval --impure --raw --expr builtins.currentSystem)"; \
+      nix run ".#checks.$system.nixos-runner-vm.driverInteractive" --print-build-logs
+
 tofu-validate:
     tofu -chdir=infra/tofu/experiment init -backend=false -lockfile=readonly -input=false
     tofu -chdir=infra/tofu/experiment validate

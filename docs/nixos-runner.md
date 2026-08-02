@@ -114,3 +114,21 @@ just nixos-runner-test
 The test is also part of `nix flake check`. It builds its own local-fake experiment into the store, boots one NixOS VM, explicitly starts the service, verifies the published bundle with the packaged binary, and checks identity, ownership, status, counts, digests, checksums, and empty staging state. It requires no cloud account, AWS API access, GPU, model download, container runtime, or external runtime service; after its Nix closure is available, the VM uses no external network access.
 
 The flake defines this check for each declared flake system, but an output being defined or successfully evaluated does not mean its VM was executed. `just nixos-runner-test` selects and runs only the current host system's check; validation reports should name the exact architecture on which each VM test actually ran.
+
+For interactive inspection, launch the test driver's interactive output:
+
+```console
+just nixos-runner-interactive
+```
+
+At the Python prompt, either run the complete integration test with `test_script()`, or boot and inspect the VM manually:
+
+```python
+machine.start()
+machine.wait_for_unit("multi-user.target")
+print(machine.succeed("systemctl start benchplane-runner.service"))
+print(machine.succeed("journalctl -u benchplane-runner.service --no-pager"))
+print(machine.succeed("find /var/lib/benchplane -maxdepth 3 -print"))
+```
+
+Exit the driver with Control-D and confirm the prompt; it will terminate the VM and clean up its temporary state. Without KVM access, QEMU falls back to software emulation and boot can be substantially slower. This interactive driver is a development and debugging interface and does not replace the hermetic `nixos-runner-test` check.
