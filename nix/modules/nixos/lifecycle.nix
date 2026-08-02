@@ -11,14 +11,9 @@ in
       default = 3600;
     };
 
-    shutdownAfterFinalization = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
-      description = "Set only after upload and terminal-state handling are implemented.";
-    };
   };
 
-  config = lib.mkIf (cfg.enable && cfg.lifecycle.enable) {
+  config = lib.mkIf (cfg.enable && (cfg.lifecycle.enable || cfg.runner.enable)) {
     assertions = [
       {
         assertion = cfg.lifecycle.maximumRuntimeSeconds <= 86400;
