@@ -113,7 +113,7 @@ just nixos-runner-test
 
 The test is also part of `nix flake check`. It builds its own local-fake experiment into the store, boots one NixOS VM, explicitly starts the service, verifies the published bundle with the packaged binary, and checks identity, ownership, status, counts, digests, checksums, and empty staging state. It requires no cloud account, AWS API access, GPU, model download, container runtime, or external runtime service; after its Nix closure is available, the VM uses no external network access.
 
-The flake defines this check for each declared flake system, but an output being defined or successfully evaluated does not mean its VM was executed. `just nixos-runner-test` selects and runs only the current host system's check; validation reports should name the exact architecture on which each VM test actually ran.
+The flake declares and evaluates this check for `x86_64-linux` and `aarch64-linux`, but declaration or successful evaluation alone does not mean a VM was executed. The primary CI job executes the flake checks on `x86_64-linux`; a separate `NixOS runner VM (aarch64)` job builds `checks.aarch64-linux.nixos-runner-vm` on GitHub's native `ubuntu-24.04-arm` runner. This establishes native CI coverage for this NixOS runner VM test on those two architectures, not broader ARM support for Benchplane. `just nixos-runner-test` selects and runs only the current host system's check; validation reports should still name the exact architecture on which each VM test actually ran.
 
 For interactive inspection, launch the test driver's interactive output:
 

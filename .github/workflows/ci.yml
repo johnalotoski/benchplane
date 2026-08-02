@@ -29,3 +29,17 @@ jobs:
         run: nix flake check --show-trace
       - name: Validate OpenTofu configuration
         run: nix develop -c just tofu-validate
+
+  nixos-runner-aarch64:
+    name: NixOS runner VM (aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Run native aarch64 NixOS runner VM test
+        run: nix build .#checks.aarch64-linux.nixos-runner-vm --print-build-logs
