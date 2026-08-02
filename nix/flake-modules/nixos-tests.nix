@@ -36,6 +36,10 @@
       checks.nixos-runner-vm = pkgs.testers.runNixOSTest {
         name = "benchplane-nixos-runner";
 
+        # KVM improves performance but is not semantically required. GitHub's
+        # hosted ARM64 runner uses same-architecture QEMU system emulation.
+        requiredFeatures.kvm = false;
+
         nodes.machine =
           { ... }:
           {
