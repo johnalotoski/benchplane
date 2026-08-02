@@ -15,7 +15,10 @@ Benchplane is currently a design-first early-stage project.
 ```console
 just fmt
 just check
+just tofu-validate
 ```
+
+The first two commands are local and deterministic. `just tofu-validate` may download the locked provider, but it must not use AWS credentials, contact AWS APIs, run a plan, or create resources.
 
 Cloud tests must be manually triggered, cost-bounded, and designed to tear down in an unconditional cleanup path.
 

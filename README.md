@@ -21,7 +21,9 @@ Many individual pieces already exist: vLLM packaging, NixOS GPU support, cloud p
 
 ## Current status
 
-This repository is an initial modular-monolith scaffold. It establishes the intended boundaries for:
+This repository is an early modular-monolith scaffold. Its first local vertical slice can parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, export a generated JSON Schema, and verify a miniature checksummed local-fake evidence fixture.
+
+It also establishes the intended boundaries for:
 
 - a typed experiment and evidence schema;
 - a Rust CLI and reusable core;
@@ -30,7 +32,7 @@ This repository is an initial modular-monolith scaffold. It establishes the inte
 - experiment definitions, studies, and evidence references;
 - CI, formatting, security, and architectural decisions.
 
-The scaffold is deliberately conservative: it does not yet provision AWS resources or run a GPU workload.
+The scaffold is deliberately conservative: it does not yet execute the full local lifecycle, provision AWS resources, or run a GPU workload.
 
 ## Planned first vertical slice
 
@@ -50,7 +52,7 @@ The first cloud milestone will extend that path to one single-GPU vLLM experimen
 ```text
 crates/        Rust CLI, reusable core, and typed schema
 schemas/       Generated, versioned public schemas
-nix/           Flake modules, packages, NixOS modules, images, and VM tests
+nix/           Flake modules, packages, and evaluated NixOS modules
 infra/tofu/    Persistent account foundation and ephemeral experiment root/module
 experiments/   Reusable experiment specifications and smoke examples
 studies/       Hypotheses, analyses, reports, and evidence locks
@@ -71,12 +73,17 @@ Then run:
 ```console
 just fmt
 just check
+just tofu-validate
 ```
+
+`just check` is deterministic and includes OpenTofu formatting, but not provider-backed semantic validation. `just tofu-validate` initializes the resource-free experiment root with its read-only provider lock file and may download the pinned provider; it does not run a plan or contact AWS APIs.
+
+Rust 1.82 is the tested minimum supported Rust version (MSRV). `rust-toolchain.toml` selects exactly Rust 1.82.0 for rustup-based development, while the Nix development shell and package deliberately use the compiler supplied by the pinned `nixpkgs` revision. Both toolchains must pass the workspace checks; the Nix compiler is reproducible through `flake.lock`, but it does not redefine the MSRV.
 
 ## Design constraints
 
 1. Framework code must not depend on `experiments/` or `studies/`.
-2. Human-authored experiment files are YAML; canonical hashing uses JSON.
+2. Human-authored experiment files are YAML. Digests use deterministic `serde_json` serialization of fully parsed, defaulted Rust types; this is not standardized canonical JSON.
 3. Requested specifications, resolved plans, runs, and attempts are distinct records.
 4. AWS credentials and model tokens never enter Nix derivations, OpenTofu state, experiment files, or evidence bundles.
 5. Ordinary CI must require neither AWS credentials nor a GPU.

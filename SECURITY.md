@@ -4,7 +4,9 @@ Benchplane handles cloud infrastructure, temporary credentials, runtime logs, an
 
 ## Reporting a vulnerability
 
-Do not open a public issue containing credentials, exploitable details, private cloud identifiers, or sensitive logs. Until a private reporting channel is configured, contact the repository owner through the private contact method listed on their GitHub profile.
+Please do not report security vulnerabilities through public GitHub issues.
+
+Use GitHub's private vulnerability reporting feature by opening the repository's Security tab and selecting **Report a vulnerability**.
 
 ## Non-negotiable repository rules
 
