@@ -35,10 +35,21 @@
         modules = [
           ../modules/nixos/profile-experiment-node.nix
           {
+            services.benchplane.runner.command = [
+              "${pkgs.coreutils}/bin/printf"
+              "contains space"
+              "single'quote"
+              "double\"quote"
+              "literal$variable"
+              "unit%n"
+              ";"
+            ];
             system.stateVersion = "24.11";
           }
         ];
       };
+
+      expectedRunnerCommand = "\"${pkgs.coreutils}/bin/printf\" \"contains space\" \"single'quote\" \"double\\\"quote\" \"literal$$variable\" \"unit%%n\" \";\"";
     in
     {
       packages.default = benchplane;
@@ -56,10 +67,11 @@
           pkgs.runCommand "benchplane-nixos-module-evaluation"
             {
               runnerCommand = evaluatedModule.config.systemd.services.benchplane-runner.serviceConfig.ExecStart;
+              inherit expectedRunnerCommand;
               maximumRuntime = toString evaluatedModule.config.services.benchplane.lifecycle.maximumRuntimeSeconds;
             }
             ''
-              test -n "$runnerCommand"
+              test "$runnerCommand" = "$expectedRunnerCommand"
               test "$maximumRuntime" = 3600
               touch $out
             '';

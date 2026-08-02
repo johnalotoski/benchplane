@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  utils,
   ...
 }:
 let
@@ -30,7 +31,7 @@ in
         User = cfg.user;
         Group = cfg.group;
         StateDirectory = cfg.stateDirectory;
-        ExecStart = lib.escapeShellArgs cfg.runner.command;
+        ExecStart = utils.escapeSystemdExecArgs cfg.runner.command;
       };
     };
   };
