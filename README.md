@@ -32,7 +32,7 @@ It also establishes the intended boundaries for:
 - experiment definitions, studies, and evidence references;
 - CI, formatting, security, and architectural decisions.
 
-The implementation is deliberately conservative: it does not provision AWS resources, execute the declarative vLLM variant, run a GPU workload, resume a run, or retry an attempt.
+The implementation is deliberately conservative: it does not provision AWS resources, execute the declarative vLLM variant, run a GPU workload, handle operating-system signals, resume a run, or retry an attempt. Local-fake work is limited to 10,000 total warmup and measured records per run so accepted input cannot request unbounded synchronous work.
 
 ## Local-fake vertical slice
 
