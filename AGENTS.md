@@ -8,13 +8,15 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 
 ## Current milestone
 
-Keep the completed zero-cost local-fake vertical slice small and reviewable before implementing AWS provisioning. It now:
+Keep the cost-free, self-contained NixOS runner-service milestone small and reviewable. Exercise the completed local-fake lifecycle through the public CLI in a real NixOS/systemd envelope that:
 
-1. parses and validates `benchplane/v1alpha1` experiment YAML;
-2. resolves defaults deterministically;
-3. executes one deterministic local-fake attempt;
-4. journals lifecycle events and publishes a verified evidence bundle atomically;
-5. keeps `nix flake check` and ordinary CI resource-free.
+1. runs as an unprivileged system identity;
+2. writes only beneath a systemd-managed persistent state directory;
+3. starts only after an explicit operator request and preserves CLI exit status;
+4. bounds oneshot activation with a process watchdog;
+5. is proven by a NixOS VM check using only local compute resources and no cloud account, GPU, or external runtime service.
+
+Do not turn this milestone into an AWS implementation or a controller-to-runner protocol.
 
 ## Boundaries
 
@@ -49,6 +51,7 @@ nix develop
 just fmt
 just check
 just local-smoke
+just nixos-runner-test
 just tofu-validate
 ```
 

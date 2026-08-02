@@ -11,7 +11,7 @@ Rust types are the initial source of truth. JSON Schema Draft 2020-12 is generat
 
 ## Local-fake runtime controls
 
-The executable zero-cost combination is provider `localFake` with runtime `localFake`. Its runtime controls are strict and versioned with the experiment schema:
+The executable cost-free local combination is provider `localFake` with runtime `localFake`. Its runtime controls are strict and versioned with the experiment schema:
 
 ```yaml
 runtime:
