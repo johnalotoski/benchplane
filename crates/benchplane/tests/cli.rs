@@ -105,6 +105,19 @@ fn validate_rejects_unknown_fields_at_declarative_boundaries() {
 }
 
 #[test]
+fn validate_rejects_duplicate_yaml_keys() {
+    let path = fixture("invalid/duplicate-key.yaml");
+    let output = benchplane(&["validate", path.to_str().expect("UTF-8 fixture path")]);
+
+    assert!(!output.status.success(), "duplicate key should be rejected");
+    assert!(
+        output_text(&output.stderr).contains("duplicate"),
+        "duplicate-key error was not reported: {}",
+        output_text(&output.stderr)
+    );
+}
+
+#[test]
 fn resolve_is_deterministic_and_materializes_defaults() {
     let path = fixture("valid/minimal-local-fake.yaml");
     let path = path.to_str().expect("UTF-8 fixture path");

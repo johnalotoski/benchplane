@@ -51,7 +51,7 @@ enum EvidenceCommand {
 fn read_experiment(path: &PathBuf) -> Result<Experiment> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("could not read experiment {}", path.display()))?;
-    serde_yaml::from_str(&source)
+    serde_saphyr::from_str(&source)
         .with_context(|| format!("could not parse experiment YAML {}", path.display()))
 }
 

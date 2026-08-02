@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn equivalent_yaml_formatting_and_mapping_order_have_the_same_digest() {
-        let first: Experiment = serde_yaml::from_str(
+        let first: Experiment = serde_saphyr::from_str(
             r#"
 apiVersion: benchplane/v1alpha1
 kind: Experiment
@@ -103,7 +103,7 @@ spec:
 "#,
         )
         .expect("first YAML should deserialize");
-        let second: Experiment = serde_yaml::from_str(
+        let second: Experiment = serde_saphyr::from_str(
             r#"
 kind: Experiment
 metadata: { labels: { alpha: first, zed: last }, name: mapping-order }

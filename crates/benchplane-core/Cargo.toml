@@ -13,4 +13,4 @@ hex.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-serde_yaml.workspace = true
+serde-saphyr.workspace = true
