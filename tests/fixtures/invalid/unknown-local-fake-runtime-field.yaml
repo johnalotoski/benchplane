@@ -1,0 +1,16 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: unknown-local-fake-field
+spec:
+  provider:
+    kind: localFake
+  runtime:
+    kind: localFake
+    seed: 42
+    scenaro: success
+  workload:
+    profile: smoke
+    requests: 1
+  budget:
+    maximumCostUsd: 0

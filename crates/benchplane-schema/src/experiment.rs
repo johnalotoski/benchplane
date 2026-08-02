@@ -8,6 +8,7 @@ use thiserror::Error;
 pub const API_VERSION: &str = "benchplane/v1alpha1";
 pub const EXPERIMENT_KIND: &str = "Experiment";
 pub const EVIDENCE_FORMAT_V1: &str = "benchplane-evidence/v1";
+pub const LOCAL_FAKE_GENERATOR_VERSION: &str = "benchplane-local-fake/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -75,13 +76,28 @@ pub enum AwsCapacity {
     deny_unknown_fields
 )]
 pub enum RuntimeSpec {
-    LocalFake,
+    LocalFake {
+        #[serde(default)]
+        seed: u64,
+        #[serde(default)]
+        scenario: LocalFakeScenario,
+    },
     Vllm {
         model: String,
         revision: String,
         #[serde(default)]
         arguments: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalFakeScenario {
+    #[default]
+    Success,
+    RuntimeFailure,
+    Interrupted,
+    InsufficientMeasurements,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -184,6 +200,7 @@ pub struct ResolvedExperiment {
     pub kind: String,
     pub experiment: Experiment,
     pub experiment_digest: String,
+    pub resolved_plan_digest: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -315,7 +332,10 @@ mod tests {
             },
             spec: ExperimentSpec {
                 provider: ProviderSpec::LocalFake,
-                runtime: RuntimeSpec::LocalFake,
+                runtime: RuntimeSpec::LocalFake {
+                    seed: 0,
+                    scenario: LocalFakeScenario::Success,
+                },
                 workload: WorkloadSpec {
                     profile: "deterministic-smoke".to_owned(),
                     requests: 10,
@@ -334,6 +354,30 @@ mod tests {
     #[test]
     fn valid_document_passes_validation() {
         assert_eq!(valid_experiment().validate(), Ok(()));
+    }
+
+    #[test]
+    fn local_fake_controls_have_stable_defaults() {
+        let experiment: Experiment = serde_json::from_value(serde_json::json!({
+            "apiVersion": API_VERSION,
+            "kind": EXPERIMENT_KIND,
+            "metadata": { "name": "defaults" },
+            "spec": {
+                "provider": { "kind": "localFake" },
+                "runtime": { "kind": "localFake" },
+                "workload": { "profile": "smoke", "requests": 1 },
+                "budget": { "maximumCostUsd": 0 }
+            }
+        }))
+        .expect("local fake defaults should deserialize");
+
+        assert_eq!(
+            experiment.spec.runtime,
+            RuntimeSpec::LocalFake {
+                seed: 0,
+                scenario: LocalFakeScenario::Success,
+            }
+        );
     }
 
     #[test]
