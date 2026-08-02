@@ -15,6 +15,7 @@
         ./nix/flake-modules/dev-shells.nix
         ./nix/flake-modules/formatter.nix
         ./nix/flake-modules/nixos-modules.nix
+        ./nix/flake-modules/nixos-tests.nix
         ./nix/flake-modules/packages.nix
       ];
 
