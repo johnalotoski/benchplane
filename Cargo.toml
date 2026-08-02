@@ -16,7 +16,7 @@ repository = "https://github.com/johnalotoski/benchplane"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
-schemars = "0.8"
+schemars = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde-saphyr = { version = "1.0", default-features = false, features = [

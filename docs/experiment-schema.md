@@ -7,7 +7,7 @@ The public schema distinguishes:
 3. run — one logical execution request;
 4. attempt — each acquisition or execution attempt within a run.
 
-Rust types are the initial source of truth. JSON Schema is generated and checked in for external consumers.
+Rust types are the initial source of truth. JSON Schema Draft 2020-12 is generated and checked in for external consumers.
 
 ## Structural and semantic restrictions
 

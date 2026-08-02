@@ -1,13 +1,7 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Experiment",
   "type": "object",
-  "required": [
-    "apiVersion",
-    "kind",
-    "metadata",
-    "spec"
-  ],
   "properties": {
     "apiVersion": {
       "type": "string"
@@ -16,24 +10,30 @@
       "type": "string"
     },
     "metadata": {
-      "$ref": "#/definitions/Metadata"
+      "$ref": "#/$defs/Metadata"
     },
     "spec": {
-      "$ref": "#/definitions/ExperimentSpec"
+      "$ref": "#/$defs/ExperimentSpec"
     }
   },
   "additionalProperties": false,
-  "definitions": {
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "$defs": {
     "ArtifactSpec": {
       "type": "object",
       "properties": {
         "format": {
-          "default": "benchplane-evidence/v1",
-          "type": "string"
+          "type": "string",
+          "default": "benchplane-evidence/v1"
         },
         "public": {
-          "default": false,
-          "type": "boolean"
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false
@@ -47,86 +47,74 @@
     },
     "BudgetSpec": {
       "type": "object",
-      "required": [
-        "maximumCostUsd"
-      ],
       "properties": {
         "maximumCostUsd": {
           "type": "number",
           "format": "double"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "maximumCostUsd"
+      ]
     },
     "ExperimentSpec": {
       "type": "object",
-      "required": [
-        "budget",
-        "provider",
-        "runtime",
-        "workload"
-      ],
       "properties": {
         "artifacts": {
+          "$ref": "#/$defs/ArtifactSpec",
           "default": {
             "format": "benchplane-evidence/v1",
             "public": false
-          },
-          "allOf": [
-            {
-              "$ref": "#/definitions/ArtifactSpec"
-            }
-          ]
+          }
         },
         "budget": {
-          "$ref": "#/definitions/BudgetSpec"
+          "$ref": "#/$defs/BudgetSpec"
         },
         "lifecycle": {
+          "$ref": "#/$defs/LifecycleSpec",
           "default": {
             "destroyOnCompletion": true,
             "maximumRuntimeSeconds": 3600
-          },
-          "allOf": [
-            {
-              "$ref": "#/definitions/LifecycleSpec"
-            }
-          ]
+          }
         },
         "measurement": {
+          "$ref": "#/$defs/MeasurementSpec",
           "default": {
             "repetitions": 3,
             "warmupRuns": 1
-          },
-          "allOf": [
-            {
-              "$ref": "#/definitions/MeasurementSpec"
-            }
-          ]
+          }
         },
         "provider": {
-          "$ref": "#/definitions/ProviderSpec"
+          "$ref": "#/$defs/ProviderSpec"
         },
         "runtime": {
-          "$ref": "#/definitions/RuntimeSpec"
+          "$ref": "#/$defs/RuntimeSpec"
         },
         "workload": {
-          "$ref": "#/definitions/WorkloadSpec"
+          "$ref": "#/$defs/WorkloadSpec"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "runtime",
+        "workload",
+        "budget"
+      ]
     },
     "LifecycleSpec": {
       "type": "object",
       "properties": {
         "destroyOnCompletion": {
-          "default": true,
-          "type": "boolean"
+          "type": "boolean",
+          "default": true
         },
         "maximumRuntimeSeconds": {
-          "default": 3600,
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "default": 3600,
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -135,71 +123,60 @@
       "type": "object",
       "properties": {
         "repetitions": {
-          "default": 3,
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "default": 3,
+          "minimum": 0
         },
         "warmupRuns": {
-          "default": 1,
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "default": 1,
+          "minimum": 0
         }
       },
       "additionalProperties": false
     },
     "Metadata": {
       "type": "object",
-      "required": [
-        "name"
-      ],
       "properties": {
         "labels": {
-          "default": {},
           "type": "object",
           "additionalProperties": {
             "type": "string"
-          }
+          },
+          "default": {}
         },
         "name": {
           "type": "string"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
     },
     "ProviderSpec": {
       "oneOf": [
         {
           "type": "object",
-          "required": [
-            "kind"
-          ],
           "properties": {
             "kind": {
               "type": "string",
-              "enum": [
-                "localFake"
-              ]
+              "const": "localFake"
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "instanceTypes",
-            "kind",
-            "region"
-          ],
           "properties": {
             "capacity": {
-              "default": "spot",
-              "allOf": [
-                {
-                  "$ref": "#/definitions/AwsCapacity"
-                }
-              ]
+              "$ref": "#/$defs/AwsCapacity",
+              "default": "spot"
             },
             "instanceTypes": {
               "type": "array",
@@ -209,15 +186,18 @@
             },
             "kind": {
               "type": "string",
-              "enum": [
-                "aws"
-              ]
+              "const": "aws"
             },
             "region": {
               "type": "string"
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "region",
+            "instanceTypes"
+          ]
         }
       ]
     },
@@ -225,39 +205,30 @@
       "oneOf": [
         {
           "type": "object",
-          "required": [
-            "kind"
-          ],
           "properties": {
             "kind": {
               "type": "string",
-              "enum": [
-                "localFake"
-              ]
+              "const": "localFake"
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "kind",
-            "model",
-            "revision"
-          ],
           "properties": {
             "arguments": {
-              "default": [],
               "type": "array",
+              "default": [],
               "items": {
                 "type": "string"
               }
             },
             "kind": {
               "type": "string",
-              "enum": [
-                "vllm"
-              ]
+              "const": "vllm"
             },
             "model": {
               "type": "string"
@@ -266,22 +237,23 @@
               "type": "string"
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "model",
+            "revision"
+          ]
         }
       ]
     },
     "WorkloadSpec": {
       "type": "object",
-      "required": [
-        "profile",
-        "requests"
-      ],
       "properties": {
         "concurrency": {
-          "default": 1,
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "default": 1,
+          "minimum": 0
         },
         "profile": {
           "type": "string"
@@ -289,10 +261,14 @@
         "requests": {
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "requests"
+      ]
     }
   }
 }
