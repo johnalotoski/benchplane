@@ -1,0 +1,44 @@
+{
+  "apiVersion": "benchplane/v1alpha1",
+  "kind": "ResolvedExperiment",
+  "experiment": {
+    "apiVersion": "benchplane/v1alpha1",
+    "kind": "Experiment",
+    "metadata": {
+      "name": "test",
+      "labels": {}
+    },
+    "spec": {
+      "provider": {
+        "kind": "localFake"
+      },
+      "runtime": {
+        "kind": "localFake",
+        "seed": 42,
+        "scenario": "success"
+      },
+      "workload": {
+        "profile": "smoke",
+        "requests": 8,
+        "concurrency": 1
+      },
+      "measurement": {
+        "warmupRuns": 1,
+        "repetitions": 3
+      },
+      "budget": {
+        "maximumCostUsd": 0.0
+      },
+      "lifecycle": {
+        "maximumRuntimeSeconds": 3600,
+        "destroyOnCompletion": true
+      },
+      "artifacts": {
+        "public": false,
+        "format": "benchplane-evidence/v1"
+      }
+    }
+  },
+  "experimentDigest": "sha256:5c9a721dd07910410d37f6e1034bea23fd1c1015f214a61c5c7ffb99710aa815",
+  "resolvedPlanDigest": "sha256:7a166ccb5aeae4ac976020b01b7e2abc7fbcb48daf2c04df41e600bac6f8a2d9"
+}

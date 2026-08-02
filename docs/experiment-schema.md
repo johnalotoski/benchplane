@@ -9,11 +9,26 @@ The public schema distinguishes:
 
 Rust types are the initial source of truth. JSON Schema Draft 2020-12 is generated and checked in for external consumers.
 
+## Local-fake runtime controls
+
+The executable zero-cost combination is provider `localFake` with runtime `localFake`. Its runtime controls are strict and versioned with the experiment schema:
+
+```yaml
+runtime:
+  kind: localFake
+  seed: 42
+  scenario: success
+```
+
+`seed` defaults to `0`. `scenario` defaults to `success` and accepts only `success`, `runtimeFailure`, `interrupted`, or `insufficientMeasurements`. Unknown fields are rejected. Synthetic measurements identify the stable generator as `benchplane-local-fake/v1`.
+
+The sum of `measurement.warmupRuns` and `measurement.repetitions` must not exceed 10,000 for the local-fake runtime. Benchplane performs this semantic check with overflow-safe arithmetic before allocating a run ID. The bound limits CPU, memory, and disk work; `maximumRuntimeSeconds` is not an execution guard for the synchronous fake runtime.
+
 ## Structural and semantic restrictions
 
 The generated JSON Schema expresses the document structure, required properties, primitive types, tagged provider/runtime variants, defaults, and closed objects. Unknown properties are rejected at the top level and at each nested object or tagged-variant boundary. `metadata.labels` is intentionally an open string-to-string map.
 
-Benchplane semantic validation applies restrictions that are awkward or misleading to express in the generated schema alone. These include supported `apiVersion` and artifact-format values, nonempty names and provider/workload/runtime identities, positive requests and repetitions, the lifecycle upper bound, and provider-specific budget rules. A `localFake` budget may be zero; an AWS budget must be finite and greater than zero.
+Benchplane semantic validation applies restrictions that are awkward or misleading to express in the generated schema alone. These include supported `apiVersion` and artifact-format values, nonempty names and provider/workload/runtime identities, positive requests and repetitions, the local-fake 10,000-record work bound, the lifecycle upper bound, and provider-specific budget rules. A `localFake` budget may be zero; an AWS budget must be finite and greater than zero.
 
 Consumers must not treat JSON Schema acceptance as a substitute for `benchplane validate`.
 
@@ -22,3 +37,7 @@ Consumers must not treat JSON Schema acceptance as a substitute for `benchplane 
 Resolution hashes `serde_json::to_vec()` output for the fully parsed, defaulted `Experiment`. Struct fields serialize in their Rust declaration order, and map-valued labels use `BTreeMap`, which orders keys lexically. YAML whitespace, presentation style, and mapping order therefore do not affect the digest after parsing.
 
 This representation is deterministic for this implementation, but it is not a standardized canonical-JSON scheme. A future version must define canonicalization before promising byte-for-byte cross-implementation reproduction.
+
+## Resolved-plan digest
+
+`resolvedPlanDigest` is SHA-256 over deterministic `serde_json` serialization of the resolved-plan content: API version, kind, fully parsed/defaulted experiment, and `experimentDigest`. The `resolvedPlanDigest` field itself is excluded from its input. Both digests are stored in the resolved plan, run record, evidence manifest, summary, and terminal CLI result.

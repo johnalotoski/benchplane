@@ -119,6 +119,15 @@
       },
       "additionalProperties": false
     },
+    "LocalFakeScenario": {
+      "type": "string",
+      "enum": [
+        "success",
+        "runtimeFailure",
+        "interrupted",
+        "insufficientMeasurements"
+      ]
+    },
     "MeasurementSpec": {
       "type": "object",
       "properties": {
@@ -209,6 +218,16 @@
             "kind": {
               "type": "string",
               "const": "localFake"
+            },
+            "scenario": {
+              "$ref": "#/$defs/LocalFakeScenario",
+              "default": "success"
+            },
+            "seed": {
+              "type": "integer",
+              "format": "uint64",
+              "default": 0,
+              "minimum": 0
             }
           },
           "additionalProperties": false,

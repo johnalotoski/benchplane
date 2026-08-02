@@ -76,6 +76,20 @@
               test "$maximumRuntime" = 3600
               touch $out
             '';
+
+        local-lifecycle-smoke = pkgs.runCommand "benchplane-local-lifecycle-smoke" { } ''
+          outputRoot="$TMPDIR/benchplane-output"
+          ${benchplane}/bin/benchplane run ${../../experiments/smoke/local-fake.yaml} \
+            --output-root "$outputRoot" --json > result.json
+          bundle="$(${pkgs.jq}/bin/jq -er '.bundlePath' result.json)"
+          ${pkgs.jq}/bin/jq -e \
+            '.runState == "succeeded" and .validityStatus == "valid"' \
+            result.json > /dev/null
+          test -d "$bundle"
+          ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
+          mkdir $out
+          cp result.json verified.txt $out/
+        '';
       };
     };
 }
