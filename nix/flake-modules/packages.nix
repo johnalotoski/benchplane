@@ -44,7 +44,8 @@
               "unit%n"
               ";"
             ];
-            system.stateVersion = "24.11";
+            # Model a new test system initially created on NixOS 26.05.
+            system.stateVersion = "26.05";
           }
         ];
       };
