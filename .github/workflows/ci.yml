@@ -23,8 +23,8 @@ jobs:
           persist-credentials: false
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
-      - name: Lint GitHub Actions
-        run: nix develop -c actionlint
+      - name: Run repository checks
+        run: nix develop -c just check
       - name: Check flake
         run: nix flake check --show-trace
       - name: Validate OpenTofu configuration

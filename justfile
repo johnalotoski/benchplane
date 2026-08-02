@@ -6,14 +6,16 @@ default:
 fmt:
     treefmt
 
-check: schema-check
+# On failure, treefmt writes formatting fixes before exiting nonzero.
+fmt-check:
+    treefmt --fail-on-change
+
+check: fmt-check schema-check
     actionlint
-    cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo test --workspace --all-features
     cargo run --quiet -p benchplane -- validate experiments/smoke/local-fake.yaml
     cargo run --quiet -p benchplane -- validate experiments/examples/vllm-single-gpu.yaml
-    tofu fmt -check -recursive infra/tofu
 
 tofu-validate:
     tofu -chdir=infra/tofu/experiment init -backend=false -lockfile=readonly -input=false
