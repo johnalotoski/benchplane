@@ -11,19 +11,22 @@ pub enum LifecycleError {
 
 #[derive(Debug, Clone)]
 pub struct Lifecycle {
+    run_id: String,
     state: RunState,
     next_sequence: u64,
     attempt_number: u32,
 }
 
 impl Lifecycle {
-    pub fn new(recorded_at: String, attempt_number: u32) -> (Self, LifecycleEvent) {
+    pub fn new(run_id: String, recorded_at: String, attempt_number: u32) -> (Self, LifecycleEvent) {
         let lifecycle = Self {
+            run_id: run_id.clone(),
             state: RunState::Created,
             next_sequence: 2,
             attempt_number,
         };
         let event = LifecycleEvent {
+            run_id,
             sequence: 1,
             recorded_at,
             from_state: None,
@@ -52,6 +55,7 @@ impl Lifecycle {
         }
 
         let event = LifecycleEvent {
+            run_id: self.run_id.clone(),
             sequence: self.next_sequence,
             recorded_at,
             from_state: Some(self.state),
@@ -86,7 +90,11 @@ mod tests {
 
     #[test]
     fn accepts_the_documented_transition_graph() {
-        let (mut lifecycle, initial) = Lifecycle::new("2026-01-01T00:00:00.000Z".into(), 1);
+        let (mut lifecycle, initial) = Lifecycle::new(
+            "run-018f6f9a-7b3c-7abc-8def-0123456789ab".into(),
+            "2026-01-01T00:00:00.000Z".into(),
+            1,
+        );
         assert_eq!(initial.from_state, None);
         assert_eq!(initial.to_state, RunState::Created);
 
@@ -106,7 +114,11 @@ mod tests {
 
     #[test]
     fn rejected_transition_does_not_change_state_or_sequence() {
-        let (mut lifecycle, _) = Lifecycle::new("2026-01-01T00:00:00.000Z".into(), 1);
+        let (mut lifecycle, _) = Lifecycle::new(
+            "run-018f6f9a-7b3c-7abc-8def-0123456789ab".into(),
+            "2026-01-01T00:00:00.000Z".into(),
+            1,
+        );
         let error = lifecycle
             .transition(RunState::Succeeded, "2026-01-01T00:00:00.001Z".into(), None)
             .expect_err("created to succeeded must be rejected");

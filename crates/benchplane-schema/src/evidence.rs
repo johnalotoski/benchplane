@@ -50,8 +50,6 @@ pub enum AttemptStatus {
     Created,
     Preparing,
     Running,
-    Collecting,
-    Finalizing,
     Succeeded,
     Failed,
     Interrupted,
@@ -114,6 +112,7 @@ pub struct AttemptRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LifecycleEvent {
+    pub run_id: String,
     pub sequence: u64,
     pub recorded_at: String,
     pub from_state: Option<RunState>,

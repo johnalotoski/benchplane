@@ -1,13 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use benchplane_schema::{EvidenceManifest, EVIDENCE_FORMAT_V1};
+use benchplane_schema::{
+    AttemptRecord, AttemptStatus, EvidenceManifest, LifecycleEvent, RunRecord, RunState,
+    RunSummary, ValidityResult, EVIDENCE_FORMAT_V1,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, File},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     path::{Component, Path, PathBuf},
 };
 use thiserror::Error;
+
+const MAX_CHECKSUM_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CHECKSUM_LINE_BYTES: usize = 4 * 1024;
+const MAX_CHECKSUM_ENTRIES: usize = 10_000;
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_IDENTITY_RECORD_BYTES: u64 = 1024 * 1024;
+const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub enum EvidenceError {
@@ -23,8 +34,21 @@ pub enum EvidenceError {
     },
     #[error("SHA256SUMS is not valid UTF-8")]
     InvalidChecksumFileEncoding,
+    #[error("SHA256SUMS exceeds the {MAX_CHECKSUM_FILE_BYTES}-byte size limit")]
+    ChecksumFileTooLarge,
+    #[error("SHA256SUMS line exceeds the {MAX_CHECKSUM_LINE_BYTES}-byte size limit")]
+    ChecksumLineTooLong,
+    #[error("SHA256SUMS exceeds the {MAX_CHECKSUM_ENTRIES}-entry limit")]
+    TooManyChecksumEntries,
+    #[error("manifest.json exceeds the {MAX_MANIFEST_BYTES}-byte size limit")]
+    ManifestTooLarge,
     #[error("invalid manifest JSON: {0}")]
     Manifest(serde_json::Error),
+    #[error("invalid evidence record {path}: {source}")]
+    InvalidRecord {
+        path: String,
+        source: serde_json::Error,
+    },
     #[error("invalid SHA256SUMS line: {0}")]
     InvalidChecksumLine(String),
     #[error("invalid SHA-256 digest for {0}")]
@@ -45,6 +69,8 @@ pub enum EvidenceError {
     MissingManifestChecksum,
     #[error("SHA256SUMS is missing payload: {0}")]
     MissingPayloadChecksum(String),
+    #[error("SHA256SUMS declares a missing payload: {0}")]
+    DeclaredPayloadMissing(String),
     #[error("required evidence payload is missing: {0}")]
     MissingRequiredPayload(String),
     #[error("checksum mismatch for {0}")]
@@ -53,11 +79,11 @@ pub enum EvidenceError {
     UnsupportedFormat(String),
     #[error("manifest field {0} must not be empty")]
     EmptyManifestField(&'static str),
-    #[error("manifest runId must be run-<lowercase UUIDv7>")]
+    #[error("manifest runId must be run-<canonical lowercase RFC 4122 UUIDv7>")]
     InvalidRunId,
     #[error("manifest runStatus must be terminal")]
     NonTerminalRunStatus,
-    #[error("manifest attemptCount must be greater than zero")]
+    #[error("manifest attemptCount must equal 1 for benchplane-evidence/v1")]
     InvalidAttemptCount,
     #[error("manifest experimentDigest must be a lowercase sha256 digest")]
     InvalidExperimentDigest,
@@ -65,19 +91,64 @@ pub enum EvidenceError {
     InvalidResolvedPlanDigest,
     #[error("SHA256SUMS already exists")]
     AlreadyFinalized,
+    #[error("bundle directory name must match manifest runId")]
+    BundleRunIdMismatch,
+    #[error("evidence record {0} has inconsistent run identity or status")]
+    InconsistentRecord(String),
 }
 
 pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceError> {
     let root = canonical_bundle_root(root)?;
-    let (_, sums_bytes) = read_regular_file(&root, Path::new("SHA256SUMS"), "SHA256SUMS")?;
-    let sums =
-        std::str::from_utf8(&sums_bytes).map_err(|_| EvidenceError::InvalidChecksumFileEncoding)?;
+    let payloads = gather_payload_paths(&root)?;
+    let sums_path = checked_regular_path(&root, Path::new("SHA256SUMS"), "SHA256SUMS")?;
+    let sums_size = fs::metadata(&sums_path)
+        .map_err(|source| EvidenceError::Read {
+            path: sums_path.display().to_string(),
+            source,
+        })?
+        .len();
+    if sums_size > MAX_CHECKSUM_FILE_BYTES {
+        return Err(EvidenceError::ChecksumFileTooLarge);
+    }
+    let sums_file = File::open(&sums_path).map_err(|source| EvidenceError::Read {
+        path: sums_path.display().to_string(),
+        source,
+    })?;
+    let mut sums = BufReader::new(sums_file);
 
     let mut checked_names = BTreeSet::new();
     let mut checked_targets = BTreeSet::new();
-    let mut verified_bytes = BTreeMap::new();
-
-    for line in sums.lines().filter(|line| !line.trim().is_empty()) {
+    let mut retained_records = BTreeMap::new();
+    let mut line = String::new();
+    let mut total_checksum_bytes = 0_u64;
+    loop {
+        line.clear();
+        let bytes_read = sums
+            .read_line(&mut line)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::InvalidData => EvidenceError::InvalidChecksumFileEncoding,
+                _ => EvidenceError::Read {
+                    path: sums_path.display().to_string(),
+                    source: error,
+                },
+            })?;
+        if bytes_read == 0 {
+            break;
+        }
+        total_checksum_bytes = total_checksum_bytes.saturating_add(bytes_read as u64);
+        if total_checksum_bytes > MAX_CHECKSUM_FILE_BYTES {
+            return Err(EvidenceError::ChecksumFileTooLarge);
+        }
+        if bytes_read > MAX_CHECKSUM_LINE_BYTES {
+            return Err(EvidenceError::ChecksumLineTooLong);
+        }
+        let line = line.trim_end_matches('\n');
+        if line.trim().is_empty() {
+            continue;
+        }
+        if checked_names.len() >= MAX_CHECKSUM_ENTRIES {
+            return Err(EvidenceError::TooManyChecksumEntries);
+        }
         let (expected, relative) = line
             .split_once("  ")
             .ok_or_else(|| EvidenceError::InvalidChecksumLine(line.to_owned()))?;
@@ -91,27 +162,33 @@ pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceE
         }
 
         let relative_path = validate_relative_path(relative)?;
+        if normalized_relative_path(relative_path)? != relative {
+            return Err(EvidenceError::UnsafePath(relative.to_owned()));
+        }
         if !checked_names.insert(relative.to_owned()) {
             return Err(EvidenceError::DuplicatePath(relative.to_owned()));
         }
+        if !payloads.contains_key(relative) {
+            return Err(EvidenceError::DeclaredPayloadMissing(relative.to_owned()));
+        }
 
-        let (canonical_path, bytes) = read_regular_file(&root, relative_path, relative)?;
+        let retained_limit = retained_limit(relative);
+        let (canonical_path, actual, bytes) =
+            hash_regular_file(&root, relative_path, relative, retained_limit)?;
         if !checked_targets.insert(canonical_path) {
             return Err(EvidenceError::DuplicatePath(relative.to_owned()));
         }
-
-        let actual = hex::encode(Sha256::digest(&bytes));
         if actual != expected {
             return Err(EvidenceError::ChecksumMismatch(relative.to_owned()));
         }
-        verified_bytes.insert(relative.to_owned(), bytes);
+        if let Some(bytes) = bytes {
+            retained_records.insert(relative.to_owned(), bytes);
+        }
     }
 
-    let manifest_bytes = verified_bytes
+    let manifest_bytes = retained_records
         .get("manifest.json")
         .ok_or(EvidenceError::MissingManifestChecksum)?;
-
-    let payloads = gather_payloads(&root)?;
     for relative in payloads.keys() {
         if !checked_names.contains(relative) {
             return Err(EvidenceError::MissingPayloadChecksum(relative.clone()));
@@ -121,53 +198,81 @@ pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceE
     let manifest: EvidenceManifest =
         serde_json::from_slice(manifest_bytes).map_err(EvidenceError::Manifest)?;
     validate_manifest(&manifest)?;
-    validate_required_payloads(&checked_names, manifest.attempt_count)?;
+    validate_required_payloads(&checked_names)?;
+    validate_record_consistency(&root, &manifest, &retained_records)?;
 
     Ok(manifest)
 }
 
-pub(crate) fn write_checksum_file(root: &Path) -> Result<Vec<u8>, EvidenceError> {
+pub(crate) struct PendingEvidenceDigest(Sha256);
+
+impl PendingEvidenceDigest {
+    pub(crate) fn finish(self) -> String {
+        format!("sha256:{}", hex::encode(self.0.finalize()))
+    }
+}
+
+pub(crate) fn write_checksum_file(root: &Path) -> Result<PendingEvidenceDigest, EvidenceError> {
     if root.join("SHA256SUMS").exists() {
         return Err(EvidenceError::AlreadyFinalized);
     }
 
     let root = canonical_bundle_root(root)?;
-    let payloads = gather_payloads(&root)?;
-    let mut sums = Vec::new();
-    for (relative, bytes) in payloads {
-        let line = format!("{}  {relative}\n", hex::encode(Sha256::digest(bytes)));
-        sums.extend_from_slice(line.as_bytes());
-    }
+    let payloads = gather_payload_paths(&root)?;
 
     let temporary = root.join("SHA256SUMS.tmp");
     let final_path = root.join("SHA256SUMS");
-    fs::write(&temporary, &sums).map_err(|source| EvidenceError::Write {
+    let file = File::create(&temporary).map_err(|source| EvidenceError::Write {
         path: temporary.display().to_string(),
         source,
     })?;
+    let mut writer = BufWriter::new(file);
+    let mut sums_hasher = Sha256::new();
+    for (relative, path) in payloads {
+        let (_, digest, _) = hash_regular_file(&root, &path, &relative, None)?;
+        let line = format!("{digest}  {relative}\n");
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|source| EvidenceError::Write {
+                path: temporary.display().to_string(),
+                source,
+            })?;
+        sums_hasher.update(line.as_bytes());
+    }
+    writer.flush().map_err(|source| EvidenceError::Write {
+        path: temporary.display().to_string(),
+        source,
+    })?;
+    drop(writer);
     fs::rename(&temporary, &final_path).map_err(|source| EvidenceError::Write {
         path: final_path.display().to_string(),
         source,
     })?;
-    Ok(sums)
+    Ok(PendingEvidenceDigest(sums_hasher))
 }
 
-fn gather_payloads(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, EvidenceError> {
+fn gather_payload_paths(root: &Path) -> Result<BTreeMap<String, PathBuf>, EvidenceError> {
     let mut payloads = BTreeMap::new();
-    gather_directory(root, root, &mut payloads)?;
+    let mut entries_seen = 0_usize;
+    gather_directory(root, root, &mut payloads, &mut entries_seen)?;
     Ok(payloads)
 }
 
 fn gather_directory(
     root: &Path,
     directory: &Path,
-    payloads: &mut BTreeMap<String, Vec<u8>>,
+    payloads: &mut BTreeMap<String, PathBuf>,
+    entries_seen: &mut usize,
 ) -> Result<(), EvidenceError> {
     let entries = fs::read_dir(directory).map_err(|source| EvidenceError::Read {
         path: directory.display().to_string(),
         source,
     })?;
     for entry in entries {
+        *entries_seen += 1;
+        if *entries_seen > MAX_CHECKSUM_ENTRIES {
+            return Err(EvidenceError::TooManyChecksumEntries);
+        }
         let entry = entry.map_err(|source| EvidenceError::Read {
             path: directory.display().to_string(),
             source,
@@ -187,13 +292,9 @@ fn gather_directory(
             return Err(EvidenceError::NonRegularFile(display));
         }
         if metadata.is_dir() {
-            gather_directory(root, &path, payloads)?;
+            gather_directory(root, &path, payloads, entries_seen)?;
         } else if metadata.is_file() {
-            let bytes = fs::read(&path).map_err(|source| EvidenceError::Read {
-                path: path.display().to_string(),
-                source,
-            })?;
-            payloads.insert(display, bytes);
+            payloads.insert(display, relative.to_owned());
         } else {
             return Err(EvidenceError::NonRegularFile(display));
         }
@@ -254,11 +355,11 @@ fn validate_relative_path(relative: &str) -> Result<&Path, EvidenceError> {
     Ok(path)
 }
 
-fn read_regular_file(
+fn checked_regular_path(
     root: &Path,
     relative: &Path,
     display: &str,
-) -> Result<(PathBuf, Vec<u8>), EvidenceError> {
+) -> Result<PathBuf, EvidenceError> {
     let path = root.join(relative);
     let metadata = fs::symlink_metadata(&path).map_err(|source| EvidenceError::Read {
         path: path.display().to_string(),
@@ -276,11 +377,79 @@ fn read_regular_file(
         return Err(EvidenceError::PathEscape(display.to_owned()));
     }
 
-    let bytes = fs::read(&canonical).map_err(|source| EvidenceError::Read {
+    Ok(canonical)
+}
+
+fn hash_regular_file(
+    root: &Path,
+    relative: &Path,
+    display: &str,
+    retain_limit: Option<u64>,
+) -> Result<(PathBuf, String, Option<Vec<u8>>), EvidenceError> {
+    let canonical = checked_regular_path(root, relative, display)?;
+    let metadata = fs::metadata(&canonical).map_err(|source| EvidenceError::Read {
         path: canonical.display().to_string(),
         source,
     })?;
-    Ok((canonical, bytes))
+    if let Some(limit) = retain_limit {
+        if metadata.len() > limit {
+            return if display == "manifest.json" {
+                Err(EvidenceError::ManifestTooLarge)
+            } else {
+                Err(EvidenceError::InconsistentRecord(format!(
+                    "{display} exceeds its parsing limit"
+                )))
+            };
+        }
+    }
+
+    let file = File::open(&canonical).map_err(|source| EvidenceError::Read {
+        path: canonical.display().to_string(),
+        source,
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut retained =
+        retain_limit.map(|limit| Vec::with_capacity(metadata.len().min(limit) as usize));
+    let mut buffer = [0_u8; HASH_BUFFER_BYTES];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|source| EvidenceError::Read {
+                path: canonical.display().to_string(),
+                source,
+            })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        if let Some(bytes) = &mut retained {
+            let limit = retain_limit.expect("retained payload has a limit") as usize;
+            if bytes.len().saturating_add(count) > limit {
+                return if display == "manifest.json" {
+                    Err(EvidenceError::ManifestTooLarge)
+                } else {
+                    Err(EvidenceError::InconsistentRecord(format!(
+                        "{display} exceeds its parsing limit"
+                    )))
+                };
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+    }
+    Ok((canonical, hex::encode(hasher.finalize()), retained))
+}
+
+fn retained_limit(relative: &str) -> Option<u64> {
+    match relative {
+        "manifest.json" => Some(MAX_MANIFEST_BYTES),
+        "run.json"
+        | "attempts/0001/attempt.json"
+        | "validity.json"
+        | "summary.json"
+        | "events.jsonl" => Some(MAX_IDENTITY_RECORD_BYTES),
+        _ => None,
+    }
 }
 
 fn validate_manifest(manifest: &EvidenceManifest) -> Result<(), EvidenceError> {
@@ -296,7 +465,7 @@ fn validate_manifest(manifest: &EvidenceManifest) -> Result<(), EvidenceError> {
     if !manifest.run_status.is_terminal() {
         return Err(EvidenceError::NonTerminalRunStatus);
     }
-    if manifest.attempt_count == 0 {
+    if manifest.attempt_count != 1 {
         return Err(EvidenceError::InvalidAttemptCount);
     }
     if !is_sha256_digest(&manifest.experiment_digest) {
@@ -308,26 +477,104 @@ fn validate_manifest(manifest: &EvidenceManifest) -> Result<(), EvidenceError> {
     Ok(())
 }
 
-fn validate_required_payloads(
-    names: &BTreeSet<String>,
-    attempt_count: u32,
-) -> Result<(), EvidenceError> {
-    let mut required = vec![
-        "experiment.yaml".to_owned(),
-        "resolved-plan.json".to_owned(),
-        "run.json".to_owned(),
-        "events.jsonl".to_owned(),
-        "validity.json".to_owned(),
-        "summary.json".to_owned(),
-        "manifest.json".to_owned(),
-    ];
-    for attempt in 1..=attempt_count {
-        required.push(format!("attempts/{attempt:04}/attempt.json"));
-        required.push(format!("attempts/{attempt:04}/measurements.jsonl"));
+fn validate_required_payloads(names: &BTreeSet<String>) -> Result<(), EvidenceError> {
+    for required_path in [
+        "experiment.yaml",
+        "resolved-plan.json",
+        "run.json",
+        "events.jsonl",
+        "validity.json",
+        "summary.json",
+        "manifest.json",
+        "attempts/0001/attempt.json",
+        "attempts/0001/measurements.jsonl",
+    ] {
+        if !names.contains(required_path) {
+            return Err(EvidenceError::MissingRequiredPayload(
+                required_path.to_owned(),
+            ));
+        }
     }
-    for required_path in required {
-        if !names.contains(&required_path) {
-            return Err(EvidenceError::MissingRequiredPayload(required_path));
+    Ok(())
+}
+
+fn parse_record<T: serde::de::DeserializeOwned>(
+    records: &BTreeMap<String, Vec<u8>>,
+    path: &str,
+) -> Result<T, EvidenceError> {
+    let bytes = records
+        .get(path)
+        .ok_or_else(|| EvidenceError::MissingRequiredPayload(path.to_owned()))?;
+    serde_json::from_slice(bytes).map_err(|source| EvidenceError::InvalidRecord {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn validate_record_consistency(
+    root: &Path,
+    manifest: &EvidenceManifest,
+    records: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), EvidenceError> {
+    if root.file_name().and_then(|name| name.to_str()) != Some(manifest.run_id.as_str()) {
+        return Err(EvidenceError::BundleRunIdMismatch);
+    }
+
+    let run: RunRecord = parse_record(records, "run.json")?;
+    if run.run_id != manifest.run_id
+        || run.run_status != manifest.run_status
+        || run.attempt_count != 1
+        || run.experiment_digest != manifest.experiment_digest
+        || run.resolved_plan_digest != manifest.resolved_plan_digest
+    {
+        return Err(EvidenceError::InconsistentRecord("run.json".to_owned()));
+    }
+    let attempt: AttemptRecord = parse_record(records, "attempts/0001/attempt.json")?;
+    let expected_attempt_status = match manifest.run_status {
+        RunState::Succeeded => AttemptStatus::Succeeded,
+        RunState::Failed => AttemptStatus::Failed,
+        RunState::Interrupted => AttemptStatus::Interrupted,
+        _ => unreachable!("manifest status was validated as terminal"),
+    };
+    if attempt.run_id != manifest.run_id
+        || attempt.attempt_number != 1
+        || attempt.status != expected_attempt_status
+    {
+        return Err(EvidenceError::InconsistentRecord(
+            "attempts/0001/attempt.json".to_owned(),
+        ));
+    }
+    let validity: ValidityResult = parse_record(records, "validity.json")?;
+    if validity.run_id != manifest.run_id || validity.status != manifest.validity_status {
+        return Err(EvidenceError::InconsistentRecord(
+            "validity.json".to_owned(),
+        ));
+    }
+    let summary: RunSummary = parse_record(records, "summary.json")?;
+    if summary.run_id != manifest.run_id
+        || summary.run_status != manifest.run_status
+        || summary.validity_status != manifest.validity_status
+        || summary.attempt_count != 1
+        || summary.experiment_digest != manifest.experiment_digest
+        || summary.resolved_plan_digest != manifest.resolved_plan_digest
+    {
+        return Err(EvidenceError::InconsistentRecord("summary.json".to_owned()));
+    }
+
+    let events = records
+        .get("events.jsonl")
+        .ok_or_else(|| EvidenceError::MissingRequiredPayload("events.jsonl".to_owned()))?;
+    for line in events
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let event: LifecycleEvent =
+            serde_json::from_slice(line).map_err(|source| EvidenceError::InvalidRecord {
+                path: "events.jsonl".to_owned(),
+                source,
+            })?;
+        if event.run_id != manifest.run_id || event.attempt_number != 1 {
+            return Err(EvidenceError::InconsistentRecord("events.jsonl".to_owned()));
         }
     }
     Ok(())
@@ -337,12 +584,12 @@ fn is_run_id(value: &str) -> bool {
     let Some(uuid_text) = value.strip_prefix("run-") else {
         return false;
     };
-    if uuid_text != uuid_text.to_ascii_lowercase() {
+    let Ok(uuid) = uuid::Uuid::parse_str(uuid_text) else {
         return false;
-    }
-    uuid::Uuid::parse_str(uuid_text)
-        .ok()
-        .is_some_and(|uuid| uuid.as_bytes()[6] >> 4 == 7)
+    };
+    uuid_text == uuid.hyphenated().to_string()
+        && uuid.get_version_num() == 7
+        && uuid.get_variant() == uuid::Variant::RFC4122
 }
 
 fn is_sha256_digest(value: &str) -> bool {
@@ -364,6 +611,7 @@ mod tests {
 
     struct TestDirectory {
         path: PathBuf,
+        cleanup_root: PathBuf,
     }
 
     impl TestDirectory {
@@ -374,18 +622,22 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir(&path).expect("create test directory");
-            Self { path }
+            Self {
+                cleanup_root: path.clone(),
+                path,
+            }
         }
     }
 
     impl Drop for TestDirectory {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
+            let _ = fs::remove_dir_all(&self.cleanup_root);
         }
     }
 
     fn fixture_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/evidence/local-fake")
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/evidence/run-018f6f9a-7b3c-7abc-8def-0123456789ab")
     }
 
     fn copy_directory(source: &Path, destination: &Path) {
@@ -402,7 +654,10 @@ mod tests {
     }
 
     fn copy_fixture(label: &str) -> TestDirectory {
-        let directory = TestDirectory::new(label);
+        let mut directory = TestDirectory::new(label);
+        directory.path = directory
+            .cleanup_root
+            .join("run-018f6f9a-7b3c-7abc-8def-0123456789ab");
         copy_directory(&fixture_root(), &directory.path);
         directory
     }
@@ -525,6 +780,64 @@ mod tests {
     }
 
     #[test]
+    fn evidence_v1_rejects_every_attempt_count_other_than_one() {
+        for attempt_count in [0, 2, u32::MAX] {
+            let directory = copy_fixture(&format!("attempt-count-{attempt_count}"));
+            let mut manifest = valid_manifest();
+            manifest.attempt_count = attempt_count;
+            rewrite_manifest(&directory.path, &manifest);
+            assert!(matches!(
+                verify_evidence_bundle(&directory.path),
+                Err(EvidenceError::InvalidAttemptCount)
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_undeclared_and_declared_but_missing_payloads() {
+        let undeclared = copy_fixture("undeclared-payload");
+        fs::write(undeclared.path.join("extra.txt"), b"not declared\n").expect("write extra");
+        assert!(matches!(
+            verify_evidence_bundle(&undeclared.path),
+            Err(EvidenceError::MissingPayloadChecksum(path)) if path == "extra.txt"
+        ));
+
+        let missing = copy_fixture("declared-missing-payload");
+        fs::remove_file(missing.path.join("summary.json")).expect("remove declared payload");
+        assert!(matches!(
+            verify_evidence_bundle(&missing.path),
+            Err(EvidenceError::DeclaredPayloadMissing(path)) if path == "summary.json"
+        ));
+    }
+
+    #[test]
+    fn rejects_manifest_over_the_bounded_parse_limit() {
+        let directory = copy_fixture("large-manifest");
+        fs::write(
+            directory.path.join("manifest.json"),
+            vec![b' '; MAX_MANIFEST_BYTES as usize + 1],
+        )
+        .expect("write oversized manifest");
+        rewrite_checksums(&directory.path);
+        assert!(matches!(
+            verify_evidence_bundle(&directory.path),
+            Err(EvidenceError::ManifestTooLarge)
+        ));
+    }
+
+    #[test]
+    fn verifies_large_nonparsed_payload_by_streaming() {
+        let directory = copy_fixture("streamed-payload");
+        fs::write(
+            directory.path.join("attempts/0001/measurements.jsonl"),
+            vec![b'x'; 2 * 1024 * 1024],
+        )
+        .expect("write large measurement payload");
+        rewrite_checksums(&directory.path);
+        verify_evidence_bundle(&directory.path).expect("large payload should be hashable");
+    }
+
+    #[test]
     fn rejects_unsafe_paths() {
         for (label, path) in [
             ("empty-path", ""),
@@ -628,7 +941,8 @@ mod tests {
 
         assert!(matches!(
             verify_evidence_bundle(&bundle),
-            Err(EvidenceError::PathEscape(path)) if path == "escape/payload"
+            Err(EvidenceError::PathEscape(path)) | Err(EvidenceError::NonRegularFile(path))
+                if path == "escape/payload" || path == "escape"
         ));
     }
 
@@ -638,6 +952,35 @@ mod tests {
         assert!(!is_sha256_digest(&format!("sha256:{}", "a".repeat(63))));
         assert!(!is_sha256_digest(&format!("sha256:{}", "A".repeat(64))));
         assert!(is_run_id("run-018f6f9a-7b3c-7abc-8def-0123456789ab"));
-        assert!(!is_run_id("run-018f6f9a-7b3c-4abc-8def-0123456789ab"));
+        for invalid in [
+            "run-018F6F9A-7B3C-7ABC-8DEF-0123456789AB",
+            "run-018f6f9a7b3c7abc8def0123456789ab",
+            "run-018f6f9a-7b3c-4abc-8def-0123456789ab",
+            "run-018f6f9a-7b3c-7abc-0def-0123456789ab",
+            " run-018f6f9a-7b3c-7abc-8def-0123456789ab",
+            "run-018f6f9a-7b3c-7abc-8def-0123456789ab ",
+            "runs-018f6f9a-7b3c-7abc-8def-0123456789ab",
+        ] {
+            assert!(!is_run_id(invalid), "accepted invalid run ID {invalid}");
+        }
+    }
+
+    #[test]
+    fn rejects_internal_run_id_disagreement() {
+        let directory = copy_fixture("run-id-disagreement");
+        let path = directory.path.join("run.json");
+        let mut run: RunRecord = serde_json::from_slice(&fs::read(&path).expect("read run record"))
+            .expect("parse run record");
+        run.run_id = "run-018f6f9a-7b3c-7abc-8def-0123456789ac".to_owned();
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&run).expect("serialize run"),
+        )
+        .expect("write run record");
+        rewrite_checksums(&directory.path);
+        assert!(matches!(
+            verify_evidence_bundle(&directory.path),
+            Err(EvidenceError::InconsistentRecord(path)) if path == "run.json"
+        ));
     }
 }

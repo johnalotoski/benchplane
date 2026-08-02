@@ -4,7 +4,8 @@ use crate::{
     evidence::write_checksum_file,
     lifecycle::{Lifecycle, LifecycleError},
     local_fake::{evaluate_validity, execute, summarize},
-    parse_experiment, resolve_experiment, verify_evidence_bundle, ParseError, ResolutionError,
+    parse_experiment, resolve_experiment, verify_evidence_bundle, EvidenceError, ParseError,
+    ResolutionError,
 };
 use benchplane_schema::{
     AttemptRecord, AttemptStatus, EvidenceManifest, FailureRecord, LocalFakeScenario, ProviderSpec,
@@ -54,13 +55,17 @@ pub enum RunError {
         record: &'static str,
         source: serde_json::Error,
     },
-    #[error(
-        "evidence finalization failed for {run_id}; staging retained at {staging_path}: {message}"
-    )]
-    Finalization {
+    #[error(transparent)]
+    Evidence(#[from] EvidenceError),
+    #[error("publication destination already exists: {0}")]
+    PublicationConflict(String),
+    #[error("run {run_id} failed during {phase}; staging retained at {staging_path}: {source}")]
+    Allocated {
         run_id: String,
+        phase: &'static str,
         staging_path: String,
-        message: String,
+        #[source]
+        source: Box<RunError>,
     },
 }
 
@@ -73,7 +78,7 @@ impl RunError {
     }
 
     pub fn is_finalization_failure(&self) -> bool {
-        matches!(self, Self::Finalization { .. })
+        matches!(self, Self::Allocated { .. })
     }
 }
 
@@ -85,8 +90,21 @@ trait RunIdGenerator {
     fn next_run_id(&self) -> String;
 }
 
-trait PublicationHook {
-    fn before_publish(&self, staging: &Path, final_path: &Path) -> std::io::Result<()>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunCheckpoint {
+    MeasurementAppend,
+    Checksum,
+    Verification,
+    Publication,
+}
+
+trait RunHook {
+    fn check(
+        &self,
+        checkpoint: RunCheckpoint,
+        staging: &Path,
+        final_path: &Path,
+    ) -> std::io::Result<()>;
 }
 
 struct SystemClock;
@@ -105,10 +123,15 @@ impl RunIdGenerator for UuidV7Generator {
     }
 }
 
-struct NoopPublicationHook;
+struct NoopRunHook;
 
-impl PublicationHook for NoopPublicationHook {
-    fn before_publish(&self, _staging: &Path, _final_path: &Path) -> std::io::Result<()> {
+impl RunHook for NoopRunHook {
+    fn check(
+        &self,
+        _checkpoint: RunCheckpoint,
+        _staging: &Path,
+        _final_path: &Path,
+    ) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -116,7 +139,7 @@ impl PublicationHook for NoopPublicationHook {
 struct RunServices<'a> {
     clock: &'a dyn Clock,
     ids: &'a dyn RunIdGenerator,
-    publication: &'a dyn PublicationHook,
+    hook: &'a dyn RunHook,
 }
 
 pub fn run_experiment(
@@ -125,14 +148,14 @@ pub fn run_experiment(
 ) -> Result<RunResult, RunError> {
     let clock = SystemClock;
     let ids = UuidV7Generator;
-    let publication = NoopPublicationHook;
+    let hook = NoopRunHook;
     run_experiment_with_services(
         experiment_bytes,
         options,
         &RunServices {
             clock: &clock,
             ids: &ids,
-            publication: &publication,
+            hook: &hook,
         },
     )
 }
@@ -155,10 +178,9 @@ fn run_experiment_with_services(
     let final_path = runs_parent.join(&run_id);
     create_new_directory(&staging)?;
     let attempt_directory = staging.join("attempts/0001");
-    create_directory(&attempt_directory)?;
 
     let created_at = services.clock.now();
-    let (mut lifecycle, initial_event) = Lifecycle::new(created_at.clone(), 1);
+    let (mut lifecycle, initial_event) = Lifecycle::new(run_id.clone(), created_at.clone(), 1);
     let mut run_record = RunRecord {
         run_id: run_id.clone(),
         run_status: RunState::Created,
@@ -179,89 +201,158 @@ fn run_experiment_with_services(
         completed_at: None,
         failure: None,
     };
-
-    write_bytes(&staging.join("experiment.yaml"), experiment_bytes)?;
-    write_json_atomic(&staging.join("resolved-plan.json"), &plan, "resolved plan")?;
     let events_path = staging.join("events.jsonl");
-    create_empty_file(&events_path)?;
-    append_json_line(&events_path, &initial_event, "lifecycle event")?;
     let measurements_path = attempt_directory.join("measurements.jsonl");
-    create_empty_file(&measurements_path)?;
-    write_snapshots(&staging, &attempt_directory, &run_record, &attempt_record)?;
 
-    persist_transition(
-        &mut lifecycle,
-        RunState::Preparing,
-        None,
-        services.clock,
-        &events_path,
-        &staging,
-        &attempt_directory,
-        &mut run_record,
-        &mut attempt_record,
-    )?;
-    persist_transition(
-        &mut lifecycle,
-        RunState::Running,
-        None,
-        services.clock,
-        &events_path,
-        &staging,
-        &attempt_directory,
-        &mut run_record,
-        &mut attempt_record,
-    )?;
-
-    let execution = execute(&plan, seed, scenario);
-    for measurement in &execution.measurements {
-        append_json_line(&measurements_path, measurement, "measurement")?;
-    }
-
-    if execution.terminal_state == RunState::Succeeded {
-        persist_transition(
-            &mut lifecycle,
-            RunState::Collecting,
-            None,
-            services.clock,
-            &events_path,
-            &staging,
-            &attempt_directory,
-            &mut run_record,
-            &mut attempt_record,
+    let outcome = (|| -> Result<RunResult, AllocatedFailure> {
+        at(create_directory(&attempt_directory), "initializing")?;
+        at(
+            write_bytes(&staging.join("experiment.yaml"), experiment_bytes),
+            "initializing",
         )?;
-    }
-    let validity = evaluate_validity(&plan, &execution, &run_id);
-    let summary = summarize(&plan, &execution, &validity, &run_id);
+        at(
+            write_json_atomic(&staging.join("resolved-plan.json"), &plan, "resolved plan"),
+            "initializing",
+        )?;
+        at(create_empty_file(&events_path), "initializing")?;
+        at(
+            append_json_line(&events_path, &initial_event, "lifecycle event"),
+            "initializing",
+        )?;
+        at(create_empty_file(&measurements_path), "initializing")?;
+        at(
+            write_snapshots(&staging, &attempt_directory, &run_record, &attempt_record),
+            "initializing",
+        )?;
 
-    let finalization = (|| -> Result<Vec<u8>, String> {
-        persist_transition(
-            &mut lifecycle,
-            RunState::Finalizing,
-            None,
-            services.clock,
-            &events_path,
-            &staging,
-            &attempt_directory,
-            &mut run_record,
-            &mut attempt_record,
-        )
-        .map_err(|error| error.to_string())?;
-        persist_transition(
-            &mut lifecycle,
-            execution.terminal_state,
-            execution.failure.clone(),
-            services.clock,
-            &events_path,
-            &staging,
-            &attempt_directory,
-            &mut run_record,
-            &mut attempt_record,
-        )
-        .map_err(|error| error.to_string())?;
-        write_json_atomic(&staging.join("validity.json"), &validity, "validity result")
-            .map_err(|error| error.to_string())?;
-        write_json_atomic(&staging.join("summary.json"), &summary, "run summary")
-            .map_err(|error| error.to_string())?;
+        at(
+            persist_run_transition(
+                &mut lifecycle,
+                RunState::Preparing,
+                None,
+                services.clock,
+                &events_path,
+                &staging,
+                &mut run_record,
+            ),
+            "preparing",
+        )?;
+        at(
+            persist_attempt_status(
+                AttemptStatus::Preparing,
+                None,
+                services.clock,
+                &attempt_directory,
+                &mut attempt_record,
+            ),
+            "preparing",
+        )?;
+        at(
+            persist_run_transition(
+                &mut lifecycle,
+                RunState::Running,
+                None,
+                services.clock,
+                &events_path,
+                &staging,
+                &mut run_record,
+            ),
+            "running",
+        )?;
+        at(
+            persist_attempt_status(
+                AttemptStatus::Running,
+                None,
+                services.clock,
+                &attempt_directory,
+                &mut attempt_record,
+            ),
+            "running",
+        )?;
+
+        let execution = execute(&plan, seed, scenario);
+        let attempt_terminal = match execution.terminal_state {
+            RunState::Succeeded => AttemptStatus::Succeeded,
+            RunState::Failed => AttemptStatus::Failed,
+            RunState::Interrupted => AttemptStatus::Interrupted,
+            _ => unreachable!("local-fake execution returns a terminal state"),
+        };
+        at(
+            persist_attempt_status(
+                attempt_terminal,
+                execution.failure.clone(),
+                services.clock,
+                &attempt_directory,
+                &mut attempt_record,
+            ),
+            "running",
+        )?;
+        at(
+            services
+                .hook
+                .check(RunCheckpoint::MeasurementAppend, &staging, &final_path)
+                .map_err(|source| RunError::Io {
+                    path: measurements_path.display().to_string(),
+                    source,
+                }),
+            "recordingMeasurements",
+        )?;
+        for measurement in &execution.measurements {
+            at(
+                append_json_line(&measurements_path, measurement, "measurement"),
+                "recordingMeasurements",
+            )?;
+        }
+
+        if execution.terminal_state == RunState::Succeeded {
+            at(
+                persist_run_transition(
+                    &mut lifecycle,
+                    RunState::Collecting,
+                    None,
+                    services.clock,
+                    &events_path,
+                    &staging,
+                    &mut run_record,
+                ),
+                "collecting",
+            )?;
+        }
+        let validity = evaluate_validity(&plan, &execution, &run_id);
+        let summary = summarize(&plan, &execution, &validity, &run_id);
+
+        at(
+            persist_run_transition(
+                &mut lifecycle,
+                RunState::Finalizing,
+                None,
+                services.clock,
+                &events_path,
+                &staging,
+                &mut run_record,
+            ),
+            "finalizing",
+        )?;
+        at(
+            persist_run_transition(
+                &mut lifecycle,
+                execution.terminal_state,
+                execution.failure.clone(),
+                services.clock,
+                &events_path,
+                &staging,
+                &mut run_record,
+            ),
+            "finalizing",
+        )?;
+        at(
+            write_json_atomic(&staging.join("validity.json"), &validity, "validity result"),
+            "finalizing",
+        )?;
+        at(
+            write_json_atomic(&staging.join("summary.json"), &summary, "run summary"),
+            "finalizing",
+        )?;
         let manifest = EvidenceManifest {
             format: EVIDENCE_FORMAT_V1.to_owned(),
             run_id: run_id.clone(),
@@ -271,55 +362,121 @@ fn run_experiment_with_services(
             resolved_plan_digest: plan.resolved_plan_digest.clone(),
             attempt_count: 1,
         };
-        write_json_atomic(
-            &staging.join("manifest.json"),
-            &manifest,
-            "evidence manifest",
-        )
-        .map_err(|error| error.to_string())?;
-        let checksum_bytes = write_checksum_file(&staging).map_err(|error| error.to_string())?;
-        verify_evidence_bundle(&staging).map_err(|error| error.to_string())?;
+        at(
+            write_json_atomic(
+                &staging.join("manifest.json"),
+                &manifest,
+                "evidence manifest",
+            ),
+            "finalizing",
+        )?;
+        at(
+            services
+                .hook
+                .check(RunCheckpoint::Checksum, &staging, &final_path)
+                .map_err(|source| RunError::Io {
+                    path: staging.display().to_string(),
+                    source,
+                }),
+            "checksumming",
+        )?;
+        let pending_evidence_digest = at(
+            write_checksum_file(&staging).map_err(RunError::from),
+            "checksumming",
+        )?;
+        at(
+            services
+                .hook
+                .check(RunCheckpoint::Verification, &staging, &final_path)
+                .map_err(|source| RunError::Io {
+                    path: staging.display().to_string(),
+                    source,
+                }),
+            "verifying",
+        )?;
+        at(
+            verify_evidence_bundle(&staging)
+                .map(|_| ())
+                .map_err(RunError::from),
+            "verifying",
+        )?;
         if final_path.exists() {
-            return Err(format!(
-                "final bundle path already exists: {}",
-                final_path.display()
-            ));
-        }
-        services
-            .publication
-            .before_publish(&staging, &final_path)
-            .map_err(|error| error.to_string())?;
-        fs::rename(&staging, &final_path).map_err(|error| error.to_string())?;
-        Ok(checksum_bytes)
-    })();
-
-    let checksum_bytes = match finalization {
-        Ok(bytes) => bytes,
-        Err(message) => {
-            persist_finalization_failure(&staging, services.clock, &mut run_record, &message);
-            return Err(RunError::Finalization {
-                run_id,
-                staging_path: staging.display().to_string(),
-                message,
+            return Err(AllocatedFailure {
+                phase: "publishing",
+                source: Box::new(RunError::PublicationConflict(
+                    final_path.display().to_string(),
+                )),
             });
         }
-    };
-    let evidence_digest = crate::resolution::sha256_digest(&checksum_bytes);
+        at(
+            services
+                .hook
+                .check(RunCheckpoint::Publication, &staging, &final_path)
+                .map_err(|source| RunError::Io {
+                    path: final_path.display().to_string(),
+                    source,
+                }),
+            "publishing",
+        )?;
+        at(
+            fs::rename(&staging, &final_path).map_err(|source| RunError::Io {
+                path: final_path.display().to_string(),
+                source,
+            }),
+            "publishing",
+        )?;
+        let evidence_digest = pending_evidence_digest.finish();
 
-    Ok(RunResult {
-        run_id,
-        run_state: execution.terminal_state,
-        validity_status: validity.status,
-        attempt_count: 1,
-        sample_count: summary.sample_count,
-        latency: summary.latency,
-        mean_throughput_milli_requests_per_second: summary
-            .mean_throughput_milli_requests_per_second,
-        bundle_path: final_path.display().to_string(),
-        experiment_digest: plan.experiment_digest,
-        resolved_plan_digest: plan.resolved_plan_digest,
-        evidence_digest,
-        failure: execution.failure,
+        Ok(RunResult {
+            run_id: run_id.clone(),
+            run_state: execution.terminal_state,
+            validity_status: validity.status,
+            attempt_count: 1,
+            sample_count: summary.sample_count,
+            latency: summary.latency,
+            mean_throughput_milli_requests_per_second: summary
+                .mean_throughput_milli_requests_per_second,
+            bundle_path: final_path.display().to_string(),
+            experiment_digest: plan.experiment_digest.clone(),
+            resolved_plan_digest: plan.resolved_plan_digest.clone(),
+            evidence_digest,
+            failure: execution.failure,
+        })
+    })();
+
+    match outcome {
+        Ok(result) => Ok(result),
+        Err(failure) => {
+            persist_allocated_failure(
+                &staging,
+                &attempt_directory,
+                &events_path,
+                services.clock,
+                &mut lifecycle,
+                &mut run_record,
+                &attempt_record,
+                failure.phase,
+                &failure.source.to_string(),
+            );
+            Err(RunError::Allocated {
+                run_id,
+                phase: failure.phase,
+                staging_path: staging.display().to_string(),
+                source: failure.source,
+            })
+        }
+    }
+}
+
+struct AllocatedFailure {
+    phase: &'static str,
+    source: Box<RunError>,
+}
+
+fn at<T>(result: Result<T, RunError>, phase: &'static str) -> Result<T, AllocatedFailure> {
+    result.map_err(|source| AllocatedFailure {
+        phase,
+        source: Box::new(source),
     })
 }
 
@@ -338,45 +495,49 @@ fn local_fake_controls(plan: &ResolvedExperiment) -> Result<(u64, LocalFakeScena
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn persist_transition(
+fn persist_run_transition(
     lifecycle: &mut Lifecycle,
     to: RunState,
     failure: Option<FailureRecord>,
     clock: &dyn Clock,
     events_path: &Path,
     staging: &Path,
-    attempt_directory: &Path,
     run_record: &mut RunRecord,
-    attempt_record: &mut AttemptRecord,
 ) -> Result<(), RunError> {
     let event = lifecycle.transition(to, clock.now(), failure.clone())?;
     append_json_line(events_path, &event, "lifecycle event")?;
 
     run_record.run_status = to;
     run_record.updated_at.clone_from(&event.recorded_at);
-    attempt_record.status = attempt_status(to);
-    attempt_record.updated_at.clone_from(&event.recorded_at);
     if to.is_terminal() {
         run_record.completed_at = Some(event.recorded_at.clone());
-        attempt_record.completed_at = Some(event.recorded_at.clone());
         run_record.failure.clone_from(&failure);
-        attempt_record.failure = failure;
     }
-    write_snapshots(staging, attempt_directory, run_record, attempt_record)
+    write_json_atomic(&staging.join("run.json"), run_record, "run record")
 }
 
-fn attempt_status(state: RunState) -> AttemptStatus {
-    match state {
-        RunState::Created => AttemptStatus::Created,
-        RunState::Preparing => AttemptStatus::Preparing,
-        RunState::Running => AttemptStatus::Running,
-        RunState::Collecting => AttemptStatus::Collecting,
-        RunState::Finalizing => AttemptStatus::Finalizing,
-        RunState::Succeeded => AttemptStatus::Succeeded,
-        RunState::Failed => AttemptStatus::Failed,
-        RunState::Interrupted => AttemptStatus::Interrupted,
+fn persist_attempt_status(
+    status: AttemptStatus,
+    failure: Option<FailureRecord>,
+    clock: &dyn Clock,
+    attempt_directory: &Path,
+    attempt_record: &mut AttemptRecord,
+) -> Result<(), RunError> {
+    let recorded_at = clock.now();
+    attempt_record.status = status;
+    attempt_record.updated_at.clone_from(&recorded_at);
+    if matches!(
+        status,
+        AttemptStatus::Succeeded | AttemptStatus::Failed | AttemptStatus::Interrupted
+    ) {
+        attempt_record.completed_at = Some(recorded_at);
+        attempt_record.failure = failure;
     }
+    write_json_atomic(
+        &attempt_directory.join("attempt.json"),
+        attempt_record,
+        "attempt record",
+    )
 }
 
 fn write_snapshots(
@@ -393,21 +554,66 @@ fn write_snapshots(
     )
 }
 
-fn persist_finalization_failure(
+#[allow(clippy::too_many_arguments)]
+fn persist_allocated_failure(
     staging: &Path,
+    attempt_directory: &Path,
+    events_path: &Path,
     clock: &dyn Clock,
+    lifecycle: &mut Lifecycle,
     run_record: &mut RunRecord,
+    attempt_record: &AttemptRecord,
+    phase: &'static str,
     message: &str,
 ) {
-    run_record.updated_at = clock.now();
-    run_record.failure = Some(FailureRecord {
-        phase: "finalizing".to_owned(),
-        code: ERROR_EVIDENCE_FINALIZATION_FAILED.to_owned(),
+    let failure = FailureRecord {
+        phase: phase.to_owned(),
+        code: if matches!(
+            phase,
+            "finalizing" | "checksumming" | "verifying" | "publishing"
+        ) {
+            ERROR_EVIDENCE_FINALIZATION_FAILED.to_owned()
+        } else {
+            benchplane_schema::ERROR_IO_OPERATION_FAILED.to_owned()
+        },
         message: message.to_owned(),
         retryable: false,
         attempt_number: 1,
-    });
+    };
+
+    if matches!(
+        lifecycle.state(),
+        RunState::Preparing | RunState::Running | RunState::Collecting
+    ) {
+        let _ = persist_run_transition(
+            lifecycle,
+            RunState::Finalizing,
+            None,
+            clock,
+            events_path,
+            staging,
+            run_record,
+        );
+    }
+    if lifecycle.state() == RunState::Finalizing {
+        let _ = persist_run_transition(
+            lifecycle,
+            RunState::Failed,
+            Some(failure.clone()),
+            clock,
+            events_path,
+            staging,
+            run_record,
+        );
+    }
+    run_record.updated_at = clock.now();
+    run_record.failure = Some(failure);
     let _ = write_json_atomic(&staging.join("run.json"), run_record, "run record");
+    let _ = write_json_atomic(
+        &attempt_directory.join("attempt.json"),
+        attempt_record,
+        "attempt record",
+    );
 }
 
 fn create_directory(path: &Path) -> Result<(), RunError> {
@@ -542,8 +748,33 @@ mod tests {
         fail: bool,
     }
 
-    impl PublicationHook for AssertPublicationBoundary {
-        fn before_publish(&self, staging: &Path, final_path: &Path) -> std::io::Result<()> {
+    struct FailAt(RunCheckpoint);
+
+    impl RunHook for FailAt {
+        fn check(
+            &self,
+            checkpoint: RunCheckpoint,
+            _staging: &Path,
+            _final_path: &Path,
+        ) -> std::io::Result<()> {
+            if checkpoint == self.0 {
+                Err(std::io::Error::other("injected run failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl RunHook for AssertPublicationBoundary {
+        fn check(
+            &self,
+            checkpoint: RunCheckpoint,
+            staging: &Path,
+            final_path: &Path,
+        ) -> std::io::Result<()> {
+            if checkpoint != RunCheckpoint::Publication {
+                return Ok(());
+            }
             assert!(staging.exists());
             assert!(!final_path.exists());
             verify_evidence_bundle(staging).expect("staging must verify before publication");
@@ -573,7 +804,7 @@ mod tests {
         root: &Path,
         seed: u64,
         scenario: LocalFakeScenario,
-        hook: &dyn PublicationHook,
+        hook: &dyn RunHook,
     ) -> Result<RunResult, RunError> {
         run_experiment_with_services(
             &experiment(seed, scenario),
@@ -583,7 +814,7 @@ mod tests {
             &RunServices {
                 clock: &FixedClock,
                 ids: &FixedIds,
-                publication: hook,
+                hook,
             },
         )
     }
@@ -594,6 +825,13 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("parse measurement"))
             .collect()
+    }
+
+    fn read_attempt(bundle: &Path) -> AttemptRecord {
+        serde_json::from_slice(
+            &fs::read(bundle.join("attempts/0001/attempt.json")).expect("read attempt record"),
+        )
+        .expect("parse attempt record")
     }
 
     fn directory_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -633,6 +871,13 @@ mod tests {
         assert_eq!(result.run_state, RunState::Succeeded);
         assert_eq!(result.validity_status, ValidityStatus::Valid);
         assert_eq!(result.sample_count, 3);
+        assert_eq!(read_attempt(&bundle).status, AttemptStatus::Succeeded);
+        assert_eq!(
+            result.evidence_digest,
+            crate::resolution::sha256_digest(
+                &fs::read(bundle.join("SHA256SUMS")).expect("read checksum inventory")
+            )
+        );
         assert!(bundle.exists());
         assert!(!directory.0.join("staging").join(FIXED_RUN_ID).exists());
         verify_evidence_bundle(&bundle).expect("published bundle must verify");
@@ -641,15 +886,10 @@ mod tests {
     #[test]
     fn checked_in_fixture_matches_fixed_execution() {
         let directory = TestDirectory::new("fixture-parity");
-        let result = execute_fixed(
-            &directory.0,
-            42,
-            LocalFakeScenario::Success,
-            &NoopPublicationHook,
-        )
-        .expect("fixed execution should succeed");
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/evidence/local-fake");
+        let result = execute_fixed(&directory.0, 42, LocalFakeScenario::Success, &NoopRunHook)
+            .expect("fixed execution should succeed");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/evidence/run-018f6f9a-7b3c-7abc-8def-0123456789ab");
 
         assert_eq!(
             directory_files(&fixture),
@@ -663,7 +903,7 @@ mod tests {
         let first = TestDirectory::new("same-seed-first");
         let second = TestDirectory::new("same-seed-second");
         let third = TestDirectory::new("different-seed");
-        let noop = NoopPublicationHook;
+        let noop = NoopRunHook;
         let first_result =
             execute_fixed(&first.0, 42, LocalFakeScenario::Success, &noop).expect("first run");
         let second_result =
@@ -690,31 +930,38 @@ mod tests {
 
     #[test]
     fn failure_interruption_and_insufficient_measurements_finalize() {
-        for (scenario, expected_state, expected_validity, expected_failure) in [
+        for (scenario, expected_state, expected_validity, expected_attempt, expected_failure) in [
             (
                 LocalFakeScenario::RuntimeFailure,
                 RunState::Failed,
                 ValidityStatus::Indeterminate,
+                AttemptStatus::Failed,
                 Some(benchplane_schema::ERROR_LOCAL_FAKE_RUNTIME_FAILURE),
             ),
             (
                 LocalFakeScenario::Interrupted,
                 RunState::Interrupted,
                 ValidityStatus::Indeterminate,
+                AttemptStatus::Interrupted,
                 Some(benchplane_schema::ERROR_LOCAL_FAKE_INTERRUPTED),
             ),
             (
                 LocalFakeScenario::InsufficientMeasurements,
                 RunState::Succeeded,
                 ValidityStatus::Invalid,
+                AttemptStatus::Succeeded,
                 None,
             ),
         ] {
             let directory = TestDirectory::new("terminal-scenario");
-            let result = execute_fixed(&directory.0, 42, scenario, &NoopPublicationHook)
+            let result = execute_fixed(&directory.0, 42, scenario, &NoopRunHook)
                 .expect("scenario should finalize");
             assert_eq!(result.run_state, expected_state);
             assert_eq!(result.validity_status, expected_validity);
+            assert_eq!(
+                read_attempt(Path::new(&result.bundle_path)).status,
+                expected_attempt
+            );
             assert_eq!(
                 result.failure.as_ref().map(|failure| failure.code.as_str()),
                 expected_failure
@@ -728,7 +975,7 @@ mod tests {
     fn output_paths_with_spaces_and_unicode_work() {
         let directory = TestDirectory::new("path-parent");
         let root = directory.0.join("output with spaces λ");
-        let result = execute_fixed(&root, 42, LocalFakeScenario::Success, &NoopPublicationHook)
+        let result = execute_fixed(&root, 42, LocalFakeScenario::Success, &NoopRunHook)
             .expect("Unicode output path should work");
         verify_evidence_bundle(Path::new(&result.bundle_path)).expect("bundle should verify");
     }
@@ -746,6 +993,15 @@ mod tests {
         assert!(hook.observed.get());
         assert!(directory.0.join("staging").join(FIXED_RUN_ID).exists());
         assert!(!directory.0.join("runs").join(FIXED_RUN_ID).exists());
+        assert!(error.to_string().contains(FIXED_RUN_ID));
+        assert!(error.to_string().contains(
+            &directory
+                .0
+                .join("staging")
+                .join(FIXED_RUN_ID)
+                .display()
+                .to_string()
+        ));
         let retained: RunRecord = serde_json::from_slice(
             &fs::read(
                 directory
@@ -761,10 +1017,58 @@ mod tests {
             retained.failure.expect("finalization failure record").code,
             ERROR_EVIDENCE_FINALIZATION_FAILED
         );
+        assert_eq!(
+            read_attempt(&directory.0.join("staging").join(FIXED_RUN_ID)).status,
+            AttemptStatus::Succeeded
+        );
         assert!(matches!(
             verify_evidence_bundle(&directory.0.join("staging").join(FIXED_RUN_ID)),
             Err(EvidenceError::ChecksumMismatch(path)) if path == "run.json"
         ));
+    }
+
+    #[test]
+    fn failures_before_and_during_finalization_retain_allocated_run_context() {
+        for checkpoint in [
+            RunCheckpoint::MeasurementAppend,
+            RunCheckpoint::Verification,
+        ] {
+            let directory = TestDirectory::new("allocated-failure-context");
+            let error = execute_fixed(
+                &directory.0,
+                42,
+                LocalFakeScenario::Success,
+                &FailAt(checkpoint),
+            )
+            .expect_err("injected failure must be reported");
+            let staging = directory.0.join("staging").join(FIXED_RUN_ID);
+            assert!(error.is_finalization_failure());
+            assert!(error.to_string().contains(FIXED_RUN_ID));
+            assert!(error.to_string().contains(&staging.display().to_string()));
+            assert!(staging.exists());
+            assert!(!directory.0.join("runs").join(FIXED_RUN_ID).exists());
+            assert!(verify_evidence_bundle(&staging).is_err());
+            assert_eq!(read_attempt(&staging).status, AttemptStatus::Succeeded);
+        }
+    }
+
+    #[test]
+    fn publication_destination_conflict_retains_staging() {
+        let directory = TestDirectory::new("publication-conflict");
+        let destination = directory.0.join("runs").join(FIXED_RUN_ID);
+        fs::create_dir_all(&destination).expect("create conflicting destination");
+        fs::write(destination.join("marker"), b"preexisting\n").expect("write marker");
+
+        let error = execute_fixed(&directory.0, 42, LocalFakeScenario::Success, &NoopRunHook)
+            .expect_err("destination conflict must fail publication");
+        let staging = directory.0.join("staging").join(FIXED_RUN_ID);
+        assert!(error.is_finalization_failure());
+        assert!(error.to_string().contains(FIXED_RUN_ID));
+        assert!(staging.exists());
+        assert!(destination.join("marker").exists());
+        assert!(!destination.join("manifest.json").exists());
+        assert!(verify_evidence_bundle(&staging).is_err());
+        assert_eq!(read_attempt(&staging).status, AttemptStatus::Succeeded);
     }
 
     #[test]
@@ -799,10 +1103,37 @@ mod tests {
             &RunServices {
                 clock: &FixedClock,
                 ids: &PanickingIds,
-                publication: &NoopPublicationHook,
+                hook: &NoopRunHook,
             },
         )
         .expect_err("unsupported combination should be rejected");
         assert!(error.is_request_rejection());
+    }
+
+    #[test]
+    fn excessive_local_fake_work_is_rejected_before_run_id_allocation() {
+        struct PanickingIds;
+        impl RunIdGenerator for PanickingIds {
+            fn next_run_id(&self) -> String {
+                panic!("run ID must not be allocated")
+            }
+        }
+
+        let bytes = b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: excessive }\nspec:\n  provider: { kind: localFake }\n  runtime: { kind: localFake }\n  workload: { profile: smoke, requests: 1 }\n  measurement: { warmupRuns: 10000, repetitions: 1 }\n  budget: { maximumCostUsd: 0 }\n";
+        let directory = TestDirectory::new("excessive");
+        let error = run_experiment_with_services(
+            bytes,
+            &RunOptions {
+                output_root: directory.0.clone(),
+            },
+            &RunServices {
+                clock: &FixedClock,
+                ids: &PanickingIds,
+                hook: &NoopRunHook,
+            },
+        )
+        .expect_err("excessive work should be rejected");
+        assert!(error.is_request_rejection());
+        assert!(!directory.0.join("staging").exists());
     }
 }
