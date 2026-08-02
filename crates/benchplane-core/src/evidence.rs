@@ -142,7 +142,7 @@ pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceE
         if bytes_read > MAX_CHECKSUM_LINE_BYTES {
             return Err(EvidenceError::ChecksumLineTooLong);
         }
-        let line = line.trim_end_matches('\n');
+        let line = line.trim_end_matches(&['\r', '\n'][..]);
         if line.trim().is_empty() {
             continue;
         }
@@ -692,6 +692,16 @@ mod tests {
     fn verifies_the_checked_in_fixture() {
         let manifest = verify_evidence_bundle(&fixture_root()).expect("fixture should verify");
         assert_eq!(manifest.format, EVIDENCE_FORMAT_V1);
+    }
+
+    #[test]
+    fn accepts_crlf_checksum_inventory() {
+        let directory = copy_fixture("crlf-checksums");
+        let sums_path = directory.path.join("SHA256SUMS");
+        let sums = fs::read_to_string(&sums_path).expect("read checksum inventory");
+        fs::write(&sums_path, sums.replace('\n', "\r\n")).expect("write CRLF checksum inventory");
+
+        verify_evidence_bundle(&directory.path).expect("CRLF checksum inventory should verify");
     }
 
     #[test]
