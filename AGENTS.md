@@ -6,21 +6,21 @@ This file gives coding agents repository-specific operating instructions.
 
 Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing the design to only vLLM, AWS, inference, NVIDIA, or NixOS even though those form the initial implementation path.
 
-## Immediate goal
+## Current milestone
 
-Complete a small, reviewable local vertical slice before implementing AWS provisioning:
+Keep the completed zero-cost local-fake vertical slice small and reviewable before implementing AWS provisioning. It now:
 
-1. parse and validate `benchplane/v1alpha1` experiment YAML;
-2. resolve defaults deterministically;
-3. generate checked-in JSON Schema;
-4. produce and verify a miniature local-fake evidence bundle;
-5. make `nix flake check` and ordinary CI green without AWS or a GPU.
+1. parses and validates `benchplane/v1alpha1` experiment YAML;
+2. resolves defaults deterministically;
+3. executes one deterministic local-fake attempt;
+4. journals lifecycle events and publishes a verified evidence bundle atomically;
+5. keeps `nix flake check` and ordinary CI resource-free.
 
 ## Boundaries
 
 - `benchplane` is the thin CLI crate.
 - `benchplane-schema` owns public data types and validation.
-- `benchplane-core` owns lifecycle, resolution, evidence, analysis, provider, and runtime logic.
+- `benchplane-core` owns parsing reuse, resolution, lifecycle, execution, validity, summaries, evidence writing, and verification.
 - Framework code must not import or embed files from `experiments/` or `studies/`.
 - Keep AWS and vLLM as concrete modules until a second real implementation proves an extraction boundary.
 
@@ -48,6 +48,8 @@ Use the supported Nix environment for Rust development and checks:
 nix develop
 just fmt
 just check
+just local-smoke
+just tofu-validate
 ```
 
 Commands may instead be invoked explicitly with `nix develop -c <command>`. Direct Cargo use outside the pinned Nix environment is currently best-effort; when Nix is unavailable, clearly report which supported checks could not be executed.
