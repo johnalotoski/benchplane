@@ -21,7 +21,7 @@ Many individual pieces already exist: vLLM packaging, NixOS GPU support, cloud p
 
 ## Current status
 
-This repository is an early modular monolith. Its first zero-cost vertical slice parses and semantically validates `benchplane/v1alpha1` experiment YAML, materializes defaults into a deterministic resolved plan, executes one deterministic local-fake attempt, evaluates validity, summarizes measurements, and atomically publishes a verified evidence bundle.
+This repository is an early modular monolith. Its first cost-free local vertical slice parses and semantically validates `benchplane/v1alpha1` experiment YAML, materializes defaults into a deterministic resolved plan, executes one deterministic local-fake attempt, evaluates validity, summarizes measurements, and atomically publishes a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
 
 It also establishes the intended boundaries for:
 
@@ -46,7 +46,7 @@ experiment YAML
 → same-filesystem atomic publication
 ```
 
-Run the resource-free smoke experiment with:
+Run the cost-free, self-contained smoke experiment with:
 
 ```console
 benchplane run experiments/smoke/local-fake.yaml
@@ -55,6 +55,12 @@ benchplane run experiments/smoke/local-fake.yaml
 The default output root is `.benchplane`; use `--output-root PATH` to select another same-filesystem staging and publication root, and `--json` for one machine-readable result object. The original YAML bytes and the normalized experiment and resolved-plan digests are all retained in the bundle.
 
 The first cloud milestone may later extend this path to one single-GPU vLLM experiment, but AWS and vLLM execution remain intentionally unimplemented.
+
+## NixOS runner service
+
+The NixOS module defines an explicitly activated `benchplane-runner.service`. It invokes the configured package's public `benchplane run` command as an unprivileged system user and stores staging data and published runs beneath the systemd-managed `/var/lib/benchplane` state directory. It is not attached to `multi-user.target`: each intentional `systemctl start benchplane-runner.service` invocation creates one new run.
+
+See [`docs/nixos-runner.md`](docs/nixos-runner.md) for module options, operation, exit behavior, timeout semantics, and security boundaries. The flake includes a cost-free NixOS VM integration test using only local compute resources; it needs no cloud account, GPU, model, container runtime, external runtime service, or runtime network access.
 
 ## Repository map
 
@@ -83,10 +89,11 @@ Then run:
 just fmt
 just check
 just local-smoke
+just nixos-runner-test
 just tofu-validate
 ```
 
-`just check` is deterministic and includes OpenTofu formatting, but not provider-backed semantic validation. `just tofu-validate` initializes the resource-free experiment root with its read-only provider lock file and may download the pinned provider; it does not run a plan or contact AWS APIs.
+`just check` is deterministic and includes OpenTofu formatting, but not provider-backed semantic validation. `just nixos-runner-test` runs only the NixOS VM check; `nix flake check` includes it with the other flake checks. `just tofu-validate` initializes the cost-free experiment root with its read-only provider lock file and may download the pinned provider; it does not run a plan or contact AWS APIs.
 
 The supported development, CI, and release environment is the Nix development shell pinned by `flake.lock`. Running Cargo directly outside that environment is currently best-effort.
 

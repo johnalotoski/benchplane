@@ -32,7 +32,7 @@ enum Command {
     /// Resolve defaults and print a deterministic machine-readable plan.
     Resolve { experiment: PathBuf },
 
-    /// Execute one synchronous, zero-cost local-fake experiment.
+    /// Execute one synchronous, cost-free local-fake experiment.
     Run {
         experiment: PathBuf,
         #[arg(long, default_value = ".benchplane")]

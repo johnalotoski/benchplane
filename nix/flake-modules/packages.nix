@@ -30,27 +30,92 @@
         };
       };
 
+      evaluationExperiment = pkgs.writeText "benchplane-module-evaluation-experiment.yaml" ''
+        apiVersion: benchplane/v1alpha1
+        kind: Experiment
+        metadata:
+          name: module-evaluation
+        spec:
+          provider:
+            kind: localFake
+          runtime:
+            kind: localFake
+          workload:
+            profile: evaluation
+            requests: 1
+          budget:
+            maximumCostUsd: 0
+      '';
+
       evaluatedModule = inputs.nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
           ../modules/nixos/profile-experiment-node.nix
           {
-            services.benchplane.runner.command = [
-              "${pkgs.coreutils}/bin/printf"
-              "contains space"
-              "single'quote"
-              "double\"quote"
-              "literal$variable"
-              "unit%n"
-              ";"
-            ];
+            services.benchplane.runner = {
+              package = benchplane;
+              experimentFile = evaluationExperiment;
+            };
             # Model a new test system initially created on NixOS 26.05.
             system.stateVersion = "26.05";
           }
         ];
       };
 
-      expectedRunnerCommand = "\"${pkgs.coreutils}/bin/printf\" \"contains space\" \"single'quote\" \"double\\\"quote\" \"literal$$variable\" \"unit%%n\" \";\"";
+      invalidRunnerEvaluation =
+        runnerConfiguration: lifecycleConfiguration:
+        builtins.tryEval (
+          (inputs.nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              ../modules/nixos/default.nix
+              {
+                services.benchplane = {
+                  enable = true;
+                  runner = {
+                    enable = true;
+                  }
+                  // runnerConfiguration;
+                  lifecycle = lifecycleConfiguration;
+                };
+                system.stateVersion = "26.05";
+              }
+            ];
+          }).config.system.build.toplevel.drvPath
+        );
+
+      missingPackageEvaluation = invalidRunnerEvaluation {
+        experimentFile = evaluationExperiment;
+      } { };
+      missingExperimentEvaluation = invalidRunnerEvaluation {
+        package = benchplane;
+      } { };
+      zeroRuntimeEvaluation = invalidRunnerEvaluation {
+        package = benchplane;
+        experimentFile = evaluationExperiment;
+      } { maximumRuntimeSeconds = 0; };
+      unsafeStateDirectoryEvaluation = builtins.tryEval (
+        (inputs.nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = [
+            ../modules/nixos/default.nix
+            {
+              services.benchplane = {
+                enable = true;
+                stateDirectory = "../benchplane";
+                runner = {
+                  enable = true;
+                  package = benchplane;
+                  experimentFile = evaluationExperiment;
+                };
+              };
+              system.stateVersion = "26.05";
+            }
+          ];
+        }).config.system.build.toplevel.drvPath
+      );
+
+      runnerService = evaluatedModule.config.systemd.services.benchplane-runner;
     in
     {
       packages.default = benchplane;
@@ -67,13 +132,30 @@
         nixos-module-evaluation =
           pkgs.runCommand "benchplane-nixos-module-evaluation"
             {
-              runnerCommand = evaluatedModule.config.systemd.services.benchplane-runner.serviceConfig.ExecStart;
-              inherit expectedRunnerCommand;
+              runnerCommand = runnerService.serviceConfig.ExecStart;
+              runnerPackage = toString benchplane;
+              stateDirectory = runnerService.serviceConfig.StateDirectory;
+              timeoutStart = runnerService.serviceConfig.TimeoutStartSec;
+              wantedBy = builtins.concatStringsSep " " runnerService.wantedBy;
               maximumRuntime = toString evaluatedModule.config.services.benchplane.lifecycle.maximumRuntimeSeconds;
+              missingPackageAccepted = toString missingPackageEvaluation.success;
+              missingExperimentAccepted = toString missingExperimentEvaluation.success;
+              zeroRuntimeAccepted = toString zeroRuntimeEvaluation.success;
+              unsafeStateDirectoryAccepted = toString unsafeStateDirectoryEvaluation.success;
             }
             ''
-              test "$runnerCommand" = "$expectedRunnerCommand"
+              case "$runnerCommand" in
+                \"$runnerPackage/bin/benchplane\"\ \"run\"\ *\ \"--output-root\"\ \"/var/lib/benchplane\") ;;
+                *) exit 1 ;;
+              esac
+              test "$stateDirectory" = benchplane
+              test "$timeoutStart" = 3600s
+              test -z "$wantedBy"
               test "$maximumRuntime" = 3600
+              test -z "$missingPackageAccepted"
+              test -z "$missingExperimentAccepted"
+              test -z "$zeroRuntimeAccepted"
+              test -z "$unsafeStateDirectoryAccepted"
               touch $out
             '';
 

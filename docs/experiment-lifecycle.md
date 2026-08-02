@@ -35,3 +35,9 @@ Run state and measurement validity are separate:
 Failures use stable codes and are recorded on the terminal event and snapshots. After run allocation, reported persistence and publication errors include the run ID, failure phase, and retained staging path. Diagnostic updates are best effort and never replace the original error.
 
 This slice does not install signal handlers. The `interrupted` local-fake scenario exercises lifecycle and evidence semantics only; it does not demonstrate SIGINT, SIGTERM, process supervision, or host-shutdown behavior. Real signal handling is deferred to a later lifecycle-hardening milestone.
+
+## NixOS service activation and timeout
+
+`benchplane-runner.service` is an explicitly started oneshot. It is not wanted by `multi-user.target`, so boot does not imply retry, resume, or a new experiment. After a completed oneshot becomes inactive, each later `systemctl start benchplane-runner.service` invokes `benchplane run` again and allocates a new run ID.
+
+The module maps `services.benchplane.lifecycle.maximumRuntimeSeconds` to systemd `TimeoutStartSec`, which bounds the running `ExecStart` while the oneshot is activating. This is a process watchdog, not a graceful lifecycle deadline. Benchplane does not yet handle SIGINT or SIGTERM; if systemd times out and terminates the process, staging data may remain and no finalized interrupted evidence bundle is guaranteed. Only the schema's deterministic `interrupted` scenario currently records an `interrupted` lifecycle outcome.

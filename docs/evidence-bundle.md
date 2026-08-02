@@ -28,6 +28,8 @@ Evidence format v1 contains exactly one attempt, so `attemptCount` must equal `1
 
 Benchplane writes under `<output-root>/staging/<run-id>`, persists the terminal event and snapshots, writes finalization-only records, rejects symlinks and unsupported file types, writes checksums through `SHA256SUMS.tmp`, and verifies the complete staging bundle with the public verifier. Only then does it atomically rename the directory to `<output-root>/runs/<run-id>` on the same filesystem.
 
+For the NixOS runner, `<output-root>` is the systemd-managed state directory, `/var/lib/benchplane` by default. Published bundles therefore appear beneath `/var/lib/benchplane/runs`; in-progress or retained diagnostic state appears beneath `/var/lib/benchplane/staging`. The service applies a `0027` umask and requests mode `0750` for the state directory so bundles are not world-readable or world-writable.
+
 Finalized bundles are immutable. A partial staging directory is not an evidence bundle. If finalization, verification, or publication fails, no final directory is created and the staging directory is retained; failure details are updated best-effort because the underlying I/O failure may also prevent further persistence. An operator may inspect or delete retained staging data, but must not publish or cite it as authoritative evidence.
 
 Same-filesystem rename provides atomic namespace visibility: consumers do not observe a partially renamed final directory. The current implementation does not synchronize every payload and parent directory and therefore makes no power-loss or kernel-crash durability promise. Atomic visibility is not the same guarantee as durable persistence after sudden host failure.

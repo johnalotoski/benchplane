@@ -1,7 +1,6 @@
 {
   config,
   lib,
-  pkgs,
   ...
 }:
 let
@@ -12,18 +11,24 @@ in
     enable = lib.mkEnableOption "the Benchplane experiment runner";
 
     user = lib.mkOption {
-      type = lib.types.str;
+      type = lib.types.strMatching "[a-z_][a-z0-9_-]*";
       default = "benchplane";
+      description = "Unprivileged system user used by the Benchplane runner.";
     };
 
     group = lib.mkOption {
-      type = lib.types.str;
+      type = lib.types.strMatching "[a-z_][a-z0-9_-]*";
       default = "benchplane";
+      description = "System group used by the Benchplane runner.";
     };
 
     stateDirectory = lib.mkOption {
-      type = lib.types.str;
+      type = lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9_.-]*";
       default = "benchplane";
+      description = ''
+        Single systemd StateDirectory component used for persistent runner
+        output beneath /var/lib.
+      '';
     };
   };
 
@@ -32,11 +37,8 @@ in
     users.users.${cfg.user} = {
       isSystemUser = true;
       group = cfg.group;
+      home = "/var/empty";
+      createHome = false;
     };
-
-    environment.systemPackages = with pkgs; [
-      curl
-      jq
-    ];
   };
 }
