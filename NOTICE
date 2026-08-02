@@ -4,3 +4,9 @@ Copyright 2026 Benchplane contributors
 This product includes software developed by the Benchplane contributors.
 Third-party software, models, datasets, and evidence artifacts retain their
 respective licenses and are not relicensed merely by being referenced here.
+
+The GitHub Actions hardening skill under
+.agents/skills/hardening-github-actions was adapted from
+input-output-hk/cardano-parts.
+Copyright 2023-2025 Input Output Global Inc (IOG).
+The source material is licensed under Apache-2.0.

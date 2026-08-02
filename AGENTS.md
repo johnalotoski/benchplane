@@ -51,3 +51,12 @@ just check
 ```
 
 Commands may instead be invoked explicitly with `nix develop -c <command>`. Direct Cargo use outside the pinned Nix environment is currently best-effort; when Nix is unavailable, clearly report which supported checks could not be executed.
+
+## GitHub Actions
+
+Whenever creating, modifying, or reviewing files under `.github/workflows/` or
+`.github/actions/`, use the `$hardening-github-actions` skill before editing to
+establish the threat model and after editing to audit the completed diff. This
+applies to CI, AWS OIDC, GPU experiments, scheduled benchmarks, releases,
+reusable workflows, artifact publication, self-hosted runners, and deployment
+automation.
