@@ -89,10 +89,11 @@ fn run_scenario(scenario: &str, json: bool) -> (TestDirectory, Output) {
 }
 
 #[test]
-fn validate_accepts_both_tagged_yaml_examples() {
+fn validate_accepts_all_tagged_yaml_examples() {
     for relative in [
         "experiments/smoke/local-fake.yaml",
         "experiments/smoke/local-cpu-probe.yaml",
+        "experiments/smoke/local-llama-cpp.yaml",
         "experiments/examples/vllm-single-gpu.yaml",
     ] {
         let path = repository_root().join(relative);
@@ -171,6 +172,15 @@ fn validate_rejects_required_invalid_fixtures() {
             "invalid/excessive-runtime.yaml",
             "must be between 1 and 86400",
         ),
+        ("invalid/llama-cpp-wrong-model.yaml", "requires model"),
+        (
+            "invalid/llama-cpp-wrong-profile.yaml",
+            "requires workload.profile",
+        ),
+        (
+            "invalid/llama-cpp-concurrency.yaml",
+            "supports only workload.concurrency 1",
+        ),
     ];
 
     for (relative, expected_error) in cases {
@@ -202,6 +212,7 @@ fn validate_rejects_unknown_fields_at_declarative_boundaries() {
             "tensorParallelSize",
         ),
         ("invalid/unknown-local-fake-runtime-field.yaml", "scenaro"),
+        ("invalid/unknown-llama-cpp-runtime-field.yaml", "modelPath"),
     ];
 
     for (relative, unknown_field) in cases {
@@ -262,6 +273,30 @@ fn resolve_is_deterministic_and_materializes_defaults() {
             .expect("string digest")
             .len(),
         71
+    );
+}
+
+#[test]
+fn llama_cpp_resolution_is_deterministic_and_materializes_fixed_identity() {
+    let path = fixture("valid/minimal-llama-cpp.yaml");
+    let path = path.to_str().expect("UTF-8 fixture path");
+    let first = benchplane(&["resolve", path]);
+    let second = benchplane(&["resolve", path]);
+    assert!(first.status.success(), "{}", output_text(&first.stderr));
+    assert_eq!(first.stdout, second.stdout);
+    let resolved: Value = serde_json::from_slice(&first.stdout).expect("resolved JSON");
+    assert_eq!(
+        resolved["experiment"]["spec"]["runtime"]["kind"],
+        "llamaCpp"
+    );
+    assert_eq!(
+        resolved["experiment"]["spec"]["runtime"]["model"],
+        "smollm2-135m-instruct-q2-k-v1"
+    );
+    assert_eq!(resolved["experiment"]["spec"]["runtime"]["outputTokens"], 4);
+    assert_eq!(
+        resolved["experiment"]["spec"]["workload"]["profile"],
+        "smollm2-chat-greedy-v1"
     );
 }
 
@@ -390,6 +425,44 @@ fn run_rejects_excessive_local_fake_work_before_allocation() {
     assert!(output_text(&output.stderr)
         .contains("runtime.localFake total generated records must not exceed 10000"));
     assert!(!output_root.exists());
+}
+
+#[test]
+fn run_rejects_invalid_llama_cpp_work_and_provider_before_allocation() {
+    for (label, provider, requests, expected) in [
+        (
+            "wrong-provider",
+            "localFake",
+            1,
+            "execution.unsupportedCombination",
+        ),
+        ("excessive-work", "local", 100, "exceeds 8192 tokens"),
+    ] {
+        let directory = TestDirectory::new(label);
+        let experiment = directory.path.join("experiment.yaml");
+        let output_root = directory.path.join("output");
+        fs::write(
+            &experiment,
+            format!(
+                "apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: {{ name: {label} }}\nspec:\n  provider: {{ kind: {provider} }}\n  runtime: {{ kind: llamaCpp }}\n  workload: {{ profile: smollm2-chat-greedy-v1, requests: {requests} }}\n  budget: {{ maximumCostUsd: 0 }}\n"
+            ),
+        )
+        .expect("write experiment");
+        let output = benchplane(&[
+            "run",
+            experiment.to_str().expect("UTF-8 experiment path"),
+            "--output-root",
+            output_root.to_str().expect("UTF-8 output root"),
+            "--json",
+        ]);
+        assert_eq!(output.status.code(), Some(2), "label={label}");
+        assert!(output.stdout.is_empty(), "label={label}");
+        assert!(
+            output_text(&output.stderr).contains(expected),
+            "label={label}"
+        );
+        assert!(!output_root.exists(), "label={label}");
+    }
 }
 
 #[test]

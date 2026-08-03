@@ -17,20 +17,20 @@
           provider:
             kind: local
           runtime:
-            kind: cpuProbe
-            outputTokens: 4
-            workUnitsPerToken: 64
+            kind: llamaCpp
+            model: smollm2-135m-instruct-q2-k-v1
+            outputTokens: 1
           workload:
-            profile: cpu-token-probe-v1
-            requests: 2
+            profile: smollm2-chat-greedy-v1
+            requests: 1
             concurrency: 1
           measurement:
             warmupRuns: 1
-            repetitions: 3
+            repetitions: 1
           budget:
             maximumCostUsd: 0
           lifecycle:
-            maximumRuntimeSeconds: 60
+            maximumRuntimeSeconds: 120
       '';
     in
     {
@@ -157,6 +157,9 @@
               summary = json.loads(machine.succeed(
                   f"cat {shlex.quote(run_directory + '/summary.json')}"
               ))
+              resolved = json.loads(machine.succeed(
+                  f"cat {shlex.quote(run_directory + '/resolved-plan.json')}"
+              ))
 
               assert manifest["format"] == "benchplane-evidence/v1"
               assert manifest["runId"] == run_id
@@ -166,9 +169,15 @@
               assert run["runStatus"] == "succeeded"
               assert attempt["status"] == "succeeded"
               assert validity["status"] == "valid"
-              assert validity["observedSamples"] == 3
+              assert validity["observedSamples"] == 1
               assert summary["attemptCount"] == 1
-              assert summary["sampleCount"] == 3
+              assert summary["sampleCount"] == 1
+              assert resolved["experiment"]["spec"]["runtime"] == {
+                  "kind": "llamaCpp",
+                  "model": "smollm2-135m-instruct-q2-k-v1",
+                  "outputTokens": 1,
+              }
+              assert resolved["experiment"]["spec"]["workload"]["profile"] == "smollm2-chat-greedy-v1"
               digest_pattern = r"sha256:[0-9a-f]{64}"
               assert re.fullmatch(digest_pattern, manifest["experimentDigest"])
               assert re.fullmatch(digest_pattern, manifest["resolvedPlanDigest"])
@@ -177,18 +186,18 @@
               measurements = machine.succeed(
                   f"cat {shlex.quote(run_directory + '/attempts/0001/measurements.jsonl')}"
               ).splitlines()
-              assert len(measurements) == 4
+              assert len(measurements) == 2
               records = [json.loads(line) for line in measurements]
               phases = [record["phase"] for record in records]
               assert phases.count("warmup") == 1
-              assert phases.count("measured") == 3
+              assert phases.count("measured") == 1
               for record in records:
-                  assert record["generator"] == "benchplane-cpu-probe/v1"
+                  assert record["generator"] == "benchplane-llama-cpp-smollm2/v1"
                   assert record["latencyMicros"] > 0
                   assert record["timeToFirstTokenMicros"] > 0
                   assert record["timeToFirstTokenMicros"] <= record["latencyMicros"]
                   assert record["throughputMilliRequestsPerSecond"] > 0
-                  assert record["successfulRequests"] == 2
+                  assert record["successfulRequests"] == 1
                   assert record["failedRequests"] == 0
 
               machine.fail(

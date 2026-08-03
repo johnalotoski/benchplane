@@ -8,15 +8,16 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 
 ## Current milestone
 
-Keep the measured local CPU-probe milestone small and reviewable. Add one concrete `local`/`cpuProbe` execution path that:
+Keep the packaged local CPU model-inference milestone small and reviewable. The concrete `local`/`llamaCpp` path:
 
-1. performs bounded, data-dependent CPU work in a package-owned child process;
-2. records observed latency, time to first output, and request throughput in evidence-v1;
-3. bounds requested work, child output, record identity/order, and runtime before or during execution;
-4. terminates and reaps a child at the experiment deadline;
-5. runs through the existing CLI and unprivileged NixOS oneshot using only local compute resources.
+1. loads the package-fixed SmolLM2-135M-Instruct Q2_K model with pinned CPU-only llama.cpp;
+2. performs bounded greedy transformer inference in a package-owned child and emits no model text;
+3. records one aggregate warmup or measured evidence-v1 record with observed latency, TTFT, throughput, and request counts;
+4. accepts only the fixed `smollm2-chat-greedy-v1` workload at concurrency one and bounds records, tokens, child output, and runtime independently in parent and helper;
+5. discards every parsed record unless the complete child protocol and exit status succeed; and
+6. runs offline through the existing CLI and unprivileged NixOS oneshot on x86-64 and aarch64 Linux.
 
-Do not turn this milestone into a model benchmark, arbitrary subprocess framework, AWS implementation, or controller-to-runner protocol. Persistent runner state and evidence belong beneath the systemd-managed state directory; `PrivateTmp=true` intentionally provides private writable temporary directories.
+This milestone demonstrates real local model execution and measurement plumbing, not representative production performance, cross-host comparability, GPU or vLLM behavior, model quality, arbitrary model/prompt selection, runtime download, a generic subprocess framework, AWS execution, or a controller-to-runner protocol. Persistent runner state and evidence belong beneath the systemd-managed state directory; `PrivateTmp=true` intentionally provides private writable temporary directories.
 
 ## Boundaries
 
@@ -52,6 +53,7 @@ just fmt
 just check
 just local-smoke
 just cpu-probe-smoke
+just llama-cpp-smoke
 just nixos-runner-test
 just tofu-validate
 ```
