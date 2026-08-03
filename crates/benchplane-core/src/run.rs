@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    cpu_probe::{self, CpuProbeConfig},
     evidence::write_checksum_file,
+    execution::{evaluate_validity, summarize},
     lifecycle::{Lifecycle, LifecycleError},
-    local_fake::{evaluate_validity, execute, summarize},
-    parse_experiment, resolve_experiment, verify_evidence_bundle, EvidenceError, ParseError,
-    ResolutionError,
+    local_fake, parse_experiment, resolve_experiment, verify_evidence_bundle, EvidenceError,
+    ParseError, ResolutionError,
 };
 use benchplane_schema::{
     AttemptRecord, AttemptStatus, EvidenceManifest, FailureRecord, LocalFakeScenario, ProviderSpec,
@@ -140,6 +141,7 @@ struct RunServices<'a> {
     clock: &'a dyn Clock,
     ids: &'a dyn RunIdGenerator,
     hook: &'a dyn RunHook,
+    cpu_probe_executable: Option<&'a Path>,
 }
 
 pub fn run_experiment(
@@ -156,6 +158,7 @@ pub fn run_experiment(
             clock: &clock,
             ids: &ids,
             hook: &hook,
+            cpu_probe_executable: None,
         },
     )
 }
@@ -167,7 +170,7 @@ fn run_experiment_with_services(
 ) -> Result<RunResult, RunError> {
     let experiment = parse_experiment(experiment_bytes)?;
     let plan = resolve_experiment(experiment)?;
-    let (seed, scenario) = local_fake_controls(&plan)?;
+    let execution_kind = execution_kind(&plan)?;
 
     let run_id = services.ids.next_run_id();
     let staging_parent = options.output_root.join("staging");
@@ -270,12 +273,23 @@ fn run_experiment_with_services(
             "running",
         )?;
 
-        let execution = execute(&plan, seed, scenario);
+        let execution = match execution_kind {
+            ExecutionKind::LocalFake { seed, scenario } => {
+                local_fake::execute(&plan, seed, scenario)
+            }
+            ExecutionKind::CpuProbe(config) => {
+                let executable = services
+                    .cpu_probe_executable
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(packaged_cpu_probe_executable);
+                cpu_probe::execute(&executable, config)
+            }
+        };
         let attempt_terminal = match execution.terminal_state {
             RunState::Succeeded => AttemptStatus::Succeeded,
             RunState::Failed => AttemptStatus::Failed,
             RunState::Interrupted => AttemptStatus::Interrupted,
-            _ => unreachable!("local-fake execution returns a terminal state"),
+            _ => unreachable!("execution returns a terminal state"),
         };
         at(
             persist_attempt_status(
@@ -480,19 +494,60 @@ fn at<T>(result: Result<T, RunError>, phase: &'static str) -> Result<T, Allocate
     })
 }
 
-fn local_fake_controls(plan: &ResolvedExperiment) -> Result<(u64, LocalFakeScenario), RunError> {
+#[derive(Debug, Clone, Copy)]
+enum ExecutionKind {
+    LocalFake {
+        seed: u64,
+        scenario: LocalFakeScenario,
+    },
+    CpuProbe(CpuProbeConfig),
+}
+
+fn execution_kind(plan: &ResolvedExperiment) -> Result<ExecutionKind, RunError> {
     match (
         &plan.experiment.spec.provider,
         &plan.experiment.spec.runtime,
     ) {
         (ProviderSpec::LocalFake, RuntimeSpec::LocalFake { seed, scenario }) => {
-            Ok((*seed, *scenario))
+            Ok(ExecutionKind::LocalFake {
+                seed: *seed,
+                scenario: *scenario,
+            })
         }
+        (
+            ProviderSpec::Local,
+            RuntimeSpec::CpuProbe {
+                output_tokens,
+                work_units_per_token,
+            },
+        ) => Ok(ExecutionKind::CpuProbe(CpuProbeConfig {
+            requests: plan.experiment.spec.workload.requests,
+            warmup_runs: plan.experiment.spec.measurement.warmup_runs,
+            repetitions: plan.experiment.spec.measurement.repetitions,
+            output_tokens: *output_tokens,
+            work_units_per_token: *work_units_per_token,
+            maximum_runtime_seconds: plan
+                .experiment
+                .spec
+                .lifecycle
+                .maximum_runtime_seconds,
+        })),
         _ => Err(RunError::UnsupportedCombination {
             code: ERROR_EXECUTION_UNSUPPORTED_COMBINATION,
-            message: "only provider localFake with runtime localFake is executable".to_owned(),
+            message: "executable combinations are provider localFake with runtime localFake and provider local with runtime cpuProbe".to_owned(),
         }),
     }
+}
+
+fn packaged_cpu_probe_executable() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| {
+            executable
+                .parent()
+                .map(|directory| directory.join("benchplane-cpu-probe"))
+        })
+        .unwrap_or_else(|| PathBuf::from("/benchplane-package-missing/bin/benchplane-cpu-probe"))
 }
 
 fn persist_run_transition(
@@ -800,6 +855,10 @@ mod tests {
         .into_bytes()
     }
 
+    fn cpu_experiment() -> Vec<u8> {
+        b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: cpu-probe }\nspec:\n  provider: { kind: local }\n  runtime: { kind: cpuProbe, outputTokens: 4, workUnitsPerToken: 32 }\n  workload: { profile: cpu-token-probe-v1, requests: 2, concurrency: 1 }\n  measurement: { warmupRuns: 1, repetitions: 2 }\n  budget: { maximumCostUsd: 0 }\n  lifecycle: { maximumRuntimeSeconds: 1 }\n".to_vec()
+    }
+
     fn execute_fixed(
         root: &Path,
         seed: u64,
@@ -815,6 +874,7 @@ mod tests {
                 clock: &FixedClock,
                 ids: &FixedIds,
                 hook,
+                cpu_probe_executable: None,
             },
         )
     }
@@ -972,6 +1032,36 @@ mod tests {
     }
 
     #[test]
+    fn cpu_probe_spawn_failure_publishes_failed_evidence() {
+        let directory = TestDirectory::new("cpu-probe-spawn-failure");
+        let unspawnable = PathBuf::from("benchplane\0cpu-probe");
+        let result = run_experiment_with_services(
+            &cpu_experiment(),
+            &RunOptions {
+                output_root: directory.0.clone(),
+            },
+            &RunServices {
+                clock: &FixedClock,
+                ids: &FixedIds,
+                hook: &NoopRunHook,
+                cpu_probe_executable: Some(&unspawnable),
+            },
+        )
+        .expect("runtime failure should finalize");
+        assert_eq!(result.run_state, RunState::Failed);
+        assert_eq!(result.validity_status, ValidityStatus::Indeterminate);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some(benchplane_schema::ERROR_CPU_PROBE_SPAWN_FAILED)
+        );
+        assert_eq!(
+            read_attempt(Path::new(&result.bundle_path)).status,
+            AttemptStatus::Failed
+        );
+        verify_evidence_bundle(Path::new(&result.bundle_path)).expect("failed bundle verifies");
+    }
+
+    #[test]
     fn output_paths_with_spaces_and_unicode_work() {
         let directory = TestDirectory::new("path-parent");
         let root = directory.0.join("output with spaces λ");
@@ -1104,6 +1194,7 @@ mod tests {
                 clock: &FixedClock,
                 ids: &PanickingIds,
                 hook: &NoopRunHook,
+                cpu_probe_executable: None,
             },
         )
         .expect_err("unsupported combination should be rejected");
@@ -1130,9 +1221,66 @@ mod tests {
                 clock: &FixedClock,
                 ids: &PanickingIds,
                 hook: &NoopRunHook,
+                cpu_probe_executable: None,
             },
         )
         .expect_err("excessive work should be rejected");
+        assert!(error.is_request_rejection());
+        assert!(!directory.0.join("staging").exists());
+    }
+
+    #[test]
+    fn excessive_cpu_probe_work_is_rejected_before_run_id_allocation() {
+        struct PanickingIds;
+        impl RunIdGenerator for PanickingIds {
+            fn next_run_id(&self) -> String {
+                panic!("run ID must not be allocated")
+            }
+        }
+
+        let bytes = b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: excessive-cpu }\nspec:\n  provider: { kind: local }\n  runtime: { kind: cpuProbe, outputTokens: 100, workUnitsPerToken: 100000 }\n  workload: { profile: cpu-token-probe-v1, requests: 11, concurrency: 1 }\n  measurement: { warmupRuns: 1, repetitions: 3 }\n  budget: { maximumCostUsd: 0 }\n";
+        let directory = TestDirectory::new("excessive-cpu");
+        let error = run_experiment_with_services(
+            bytes,
+            &RunOptions {
+                output_root: directory.0.clone(),
+            },
+            &RunServices {
+                clock: &FixedClock,
+                ids: &PanickingIds,
+                hook: &NoopRunHook,
+                cpu_probe_executable: None,
+            },
+        )
+        .expect_err("excessive work should be rejected");
+        assert!(error.is_request_rejection());
+        assert!(!directory.0.join("staging").exists());
+    }
+
+    #[test]
+    fn excessive_cpu_probe_records_are_rejected_before_run_id_allocation() {
+        struct PanickingIds;
+        impl RunIdGenerator for PanickingIds {
+            fn next_run_id(&self) -> String {
+                panic!("run ID must not be allocated")
+            }
+        }
+
+        let bytes = b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: excessive-cpu-records }\nspec:\n  provider: { kind: local }\n  runtime: { kind: cpuProbe, outputTokens: 1, workUnitsPerToken: 1 }\n  workload: { profile: cpu-token-probe-v1, requests: 1, concurrency: 1 }\n  measurement: { warmupRuns: 1, repetitions: 1000 }\n  budget: { maximumCostUsd: 0 }\n";
+        let directory = TestDirectory::new("excessive-cpu-records");
+        let error = run_experiment_with_services(
+            bytes,
+            &RunOptions {
+                output_root: directory.0.clone(),
+            },
+            &RunServices {
+                clock: &FixedClock,
+                ids: &PanickingIds,
+                hook: &NoopRunHook,
+                cpu_probe_executable: None,
+            },
+        )
+        .expect_err("excessive records should be rejected");
         assert!(error.is_request_rejection());
         assert!(!directory.0.join("staging").exists());
     }

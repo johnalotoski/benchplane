@@ -9,6 +9,10 @@ pub const ERROR_EVIDENCE_FINALIZATION_FAILED: &str = "evidence.finalizationFaile
 pub const ERROR_LIFECYCLE_INVALID_TRANSITION: &str = "lifecycle.invalidTransition";
 pub const ERROR_IO_OPERATION_FAILED: &str = "io.operationFailed";
 pub const ERROR_EXECUTION_UNSUPPORTED_COMBINATION: &str = "execution.unsupportedCombination";
+pub const ERROR_CPU_PROBE_SPAWN_FAILED: &str = "cpuProbe.spawnFailed";
+pub const ERROR_CPU_PROBE_EXIT_FAILED: &str = "cpuProbe.exitFailed";
+pub const ERROR_CPU_PROBE_OUTPUT_INVALID: &str = "cpuProbe.outputInvalid";
+pub const ERROR_CPU_PROBE_DEADLINE_EXCEEDED: &str = "cpuProbe.deadlineExceeded";
 
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,

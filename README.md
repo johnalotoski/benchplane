@@ -21,7 +21,7 @@ Many individual pieces already exist: vLLM packaging, NixOS GPU support, cloud p
 
 ## Current status
 
-This repository is an early modular monolith. Its first cost-free local vertical slice parses and semantically validates `benchplane/v1alpha1` experiment YAML, materializes defaults into a deterministic resolved plan, executes one deterministic local-fake attempt, evaluates validity, summarizes measurements, and atomically publishes a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
+This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, execute either deterministic local-fake work or a measured local CPU token probe, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
 
 It also establishes the intended boundaries for:
 
@@ -32,15 +32,16 @@ It also establishes the intended boundaries for:
 - experiment definitions, studies, and evidence references;
 - CI, formatting, security, and architectural decisions.
 
-The implementation is deliberately conservative: it does not provision AWS resources, execute the declarative vLLM variant, run a GPU workload, handle operating-system signals, resume a run, or retry an attempt. Local-fake work is limited to 10,000 total warmup and measured records per run so accepted input cannot request unbounded synchronous work.
+The implementation is deliberately conservative: it does not provision AWS resources, execute the declarative vLLM variant, run a model or GPU workload, handle parent operating-system signals, resume a run, or retry an attempt. Local-fake records and CPU-probe records and work are explicitly bounded before a run ID is allocated.
 
-## Local-fake vertical slice
+## Local execution
 
 ```text
 experiment YAML
 → strict parsing and semantic validation
 → deterministic resolution and plan identity
-→ deterministic local-fake execution
+→ concrete local runtime execution
+  (deterministic local-fake or measured CPU probe)
 → lifecycle journal, records, measurements, validity, and summary
 → verified evidence finalization
 → same-filesystem atomic publication
@@ -50,7 +51,10 @@ Run the cost-free, self-contained smoke experiment with:
 
 ```console
 benchplane run experiments/smoke/local-fake.yaml
+benchplane run experiments/smoke/local-cpu-probe.yaml
 ```
+
+The CPU probe starts the fixed `benchplane-cpu-probe` executable from the same package without a shell. It performs deterministic, data-dependent CPU work and records observed request latency, first-output latency, and request throughput. Timing varies by host and proves only local CPU execution, subprocess supervision, and inference-shaped measurement plumbing—not model, GPU, vLLM, cross-host, or production inference performance.
 
 The default output root is `.benchplane`; use `--output-root PATH` to select another same-filesystem staging and publication root, and `--json` for one machine-readable result object. The original YAML bytes and the normalized experiment and resolved-plan digests are all retained in the bundle.
 
@@ -89,6 +93,7 @@ Then run:
 just fmt
 just check
 just local-smoke
+just cpu-probe-smoke
 just nixos-runner-test
 just tofu-validate
 ```

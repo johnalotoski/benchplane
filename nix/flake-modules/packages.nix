@@ -172,6 +172,22 @@
           mkdir $out
           cp result.json verified.txt $out/
         '';
+
+        cpu-probe-lifecycle-smoke = pkgs.runCommand "benchplane-cpu-probe-lifecycle-smoke" { } ''
+          outputRoot="$TMPDIR/benchplane-output"
+          ${benchplane}/bin/benchplane run ${../../experiments/smoke/local-cpu-probe.yaml} \
+            --output-root "$outputRoot" --json > result.json
+          bundle="$(${pkgs.jq}/bin/jq -er '.bundlePath' result.json)"
+          ${pkgs.jq}/bin/jq -e \
+            '.runState == "succeeded" and .validityStatus == "valid"' \
+            result.json > /dev/null
+          ${pkgs.jq}/bin/jq -e -s \
+            'length == 4 and all(.generator == "benchplane-cpu-probe/v1")' \
+            "$bundle/attempts/0001/measurements.jsonl" > /dev/null
+          ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
+          mkdir $out
+          cp result.json verified.txt $out/
+        '';
       };
     };
 }

@@ -109,6 +109,29 @@ mod tests {
     }
 
     #[test]
+    fn cpu_probe_resolution_is_deterministic() {
+        let experiment: Experiment = serde_saphyr::from_str(
+            r#"
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata: { name: cpu-probe }
+spec:
+  provider: { kind: local }
+  runtime: { kind: cpuProbe, outputTokens: 8, workUnitsPerToken: 128 }
+  workload: { profile: cpu-token-probe-v1, requests: 2, concurrency: 1 }
+  measurement: { warmupRuns: 1, repetitions: 3 }
+  budget: { maximumCostUsd: 0 }
+"#,
+        )
+        .expect("CPU probe experiment");
+        let first = resolve_experiment(experiment.clone()).expect("first resolution");
+        let second = resolve_experiment(experiment).expect("second resolution");
+        assert_eq!(first, second);
+        assert_eq!(first.experiment_digest.len(), 71);
+        assert_eq!(first.resolved_plan_digest.len(), 71);
+    }
+
+    #[test]
     fn resolution_rejects_invalid_experiments() {
         let mut invalid = experiment();
         invalid.spec.workload.requests = 0;

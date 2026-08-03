@@ -8,15 +8,15 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 
 ## Current milestone
 
-Keep the cost-free, self-contained NixOS runner-service milestone small and reviewable. Exercise the completed local-fake lifecycle through the public CLI in a real NixOS/systemd envelope that:
+Keep the measured local CPU-probe milestone small and reviewable. Add one concrete `local`/`cpuProbe` execution path that:
 
-1. runs as an unprivileged system identity;
-2. writes persistent runner state and evidence beneath a systemd-managed state directory;
-3. starts only after an explicit operator request and preserves CLI exit status;
-4. bounds oneshot activation with a process watchdog;
-5. is proven by a NixOS VM check using only local compute resources and no cloud account, GPU, or external runtime service.
+1. performs bounded, data-dependent CPU work in a package-owned child process;
+2. records observed latency, time to first output, and request throughput in evidence-v1;
+3. bounds requested work, child output, record identity/order, and runtime before or during execution;
+4. terminates and reaps a child at the experiment deadline;
+5. runs through the existing CLI and unprivileged NixOS oneshot using only local compute resources.
 
-Do not turn this milestone into an AWS implementation or a controller-to-runner protocol.
+Do not turn this milestone into a model benchmark, arbitrary subprocess framework, AWS implementation, or controller-to-runner protocol. Persistent runner state and evidence belong beneath the systemd-managed state directory; `PrivateTmp=true` intentionally provides private writable temporary directories.
 
 ## Boundaries
 
@@ -51,6 +51,7 @@ nix develop
 just fmt
 just check
 just local-smoke
+just cpu-probe-smoke
 just nixos-runner-test
 just tofu-validate
 ```
