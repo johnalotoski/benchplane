@@ -4,7 +4,7 @@ use crate::execution::ExecutionOutput;
 use benchplane_schema::{
     FailureRecord, MeasurementPhase, MeasurementRecord, RunState, CPU_PROBE_GENERATOR_VERSION,
     ERROR_CPU_PROBE_DEADLINE_EXCEEDED, ERROR_CPU_PROBE_EXIT_FAILED, ERROR_CPU_PROBE_OUTPUT_INVALID,
-    ERROR_CPU_PROBE_SPAWN_FAILED,
+    ERROR_CPU_PROBE_SPAWN_FAILED, MAX_CPU_PROBE_RECORDS,
 };
 use std::{
     io::Read,
@@ -17,9 +17,17 @@ use std::{
 
 const MAX_LINE_BYTES: usize = 16 * 1024;
 const MAX_STDOUT_BYTES: usize = 1024 * 1024;
+/// Includes one serialized measurement record and its trailing newline.
+const MAX_SERIALIZED_RECORD_BYTES: usize = 512;
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_DIAGNOSTIC_CHARS: usize = 1024;
+const MAX_ACCEPTED_RECORD_OUTPUT_BYTES: usize =
+    match (MAX_CPU_PROBE_RECORDS as usize).checked_mul(MAX_SERIALIZED_RECORD_BYTES) {
+        Some(value) => value,
+        None => panic!("CPU probe accepted output bound overflowed"),
+    };
+const _: () = assert!(MAX_ACCEPTED_RECORD_OUTPUT_BYTES <= MAX_STDOUT_BYTES);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CpuProbeConfig {
@@ -38,7 +46,11 @@ enum StdoutEvent {
 }
 
 pub(crate) fn execute(executable: &Path, config: CpuProbeConfig) -> ExecutionOutput {
-    match execute_inner(executable, config) {
+    into_execution_output(execute_inner(executable, config))
+}
+
+fn into_execution_output(result: Result<Vec<MeasurementRecord>, FailureRecord>) -> ExecutionOutput {
+    match result {
         Ok(measurements) => ExecutionOutput {
             measurements,
             terminal_state: RunState::Succeeded,
@@ -63,6 +75,7 @@ fn execute_command(
     mut command: Command,
     config: CpuProbeConfig,
 ) -> Result<Vec<MeasurementRecord>, FailureRecord> {
+    let expected_count = expected_record_count(config)?;
     command
         .arg("--requests")
         .arg(config.requests.to_string())
@@ -91,7 +104,7 @@ fn execute_command(
     let stderr_thread = thread::spawn(move || read_stderr(stderr));
     let deadline = Instant::now() + Duration::from_secs(config.maximum_runtime_seconds);
 
-    let result = supervise(&mut child, &stdout_rx, config, deadline);
+    let result = supervise(&mut child, &stdout_rx, config, expected_count, deadline);
     if result.is_err() {
         terminate_and_reap(&mut child);
     }
@@ -100,12 +113,11 @@ fn execute_command(
 
     match result {
         Ok((status, measurements)) if status.success() => {
-            let expected = (config.warmup_runs + config.repetitions) as usize;
-            if measurements.len() == expected {
+            if measurements.len() == expected_count {
                 Ok(measurements)
             } else {
                 Err(output_failure(format!(
-                    "CPU probe emitted {} records; expected {expected}",
+                    "CPU probe emitted {} records; expected {expected_count}",
                     measurements.len()
                 )))
             }
@@ -131,9 +143,9 @@ fn supervise(
     child: &mut Child,
     stdout: &Receiver<StdoutEvent>,
     config: CpuProbeConfig,
+    expected_count: usize,
     deadline: Instant,
 ) -> Result<(std::process::ExitStatus, Vec<MeasurementRecord>), FailureRecord> {
-    let expected_count = (config.warmup_runs + config.repetitions) as usize;
     let mut measurements = Vec::with_capacity(expected_count);
     let mut stdout_done = false;
     let mut exit_status = None;
@@ -158,6 +170,15 @@ fn supervise(
                         "CPU probe emitted excessive measurement records",
                     ));
                 }
+                if line
+                    .len()
+                    .checked_add(1)
+                    .is_none_or(|bytes| bytes > MAX_SERIALIZED_RECORD_BYTES)
+                {
+                    return Err(output_failure(format!(
+                        "CPU probe measurement record exceeded the {MAX_SERIALIZED_RECORD_BYTES} byte protocol envelope"
+                    )));
+                }
                 let record: MeasurementRecord = serde_json::from_slice(&line).map_err(|error| {
                     output_failure(format!("CPU probe emitted malformed JSON: {error}"))
                 })?;
@@ -176,6 +197,21 @@ fn supervise(
     }
 
     Ok((exit_status.expect("child exit observed"), measurements))
+}
+
+fn expected_record_count(config: CpuProbeConfig) -> Result<usize, FailureRecord> {
+    let count = config
+        .warmup_runs
+        .checked_add(config.repetitions)
+        .filter(|count| *count <= MAX_CPU_PROBE_RECORDS)
+        .ok_or_else(|| output_failure("CPU probe requested excessive measurement records"))?;
+    let count = usize::try_from(count)
+        .map_err(|_| output_failure("CPU probe measurement record count is not representable"))?;
+    count
+        .checked_mul(MAX_SERIALIZED_RECORD_BYTES)
+        .filter(|bytes| *bytes <= MAX_STDOUT_BYTES)
+        .ok_or_else(|| output_failure("CPU probe requested output exceeds its transport bound"))?;
+    Ok(count)
 }
 
 fn validate_record(
@@ -229,9 +265,9 @@ fn read_stdout(mut reader: impl Read, sender: Sender<StdoutEvent>) {
         };
         total = total.saturating_add(count);
         if total > MAX_STDOUT_BYTES {
-            let _ = sender.send(StdoutEvent::Error(
-                "CPU probe output exceeded the 1048576 byte limit".to_owned(),
-            ));
+            let _ = sender.send(StdoutEvent::Error(format!(
+                "CPU probe output exceeded the {MAX_STDOUT_BYTES} byte limit"
+            )));
             return;
         }
         for byte in &buffer[..count] {
@@ -245,9 +281,9 @@ fn read_stdout(mut reader: impl Read, sender: Sender<StdoutEvent>) {
             } else {
                 line.push(*byte);
                 if line.len() > MAX_LINE_BYTES {
-                    let _ = sender.send(StdoutEvent::Error(
-                        "CPU probe output line exceeded the 16384 byte limit".to_owned(),
-                    ));
+                    let _ = sender.send(StdoutEvent::Error(format!(
+                        "CPU probe output line exceeded the {MAX_LINE_BYTES} byte limit"
+                    )));
                     return;
                 }
             }
@@ -367,6 +403,39 @@ mod tests {
     }
 
     #[test]
+    fn maximum_accepted_records_fit_the_output_transport_bound() {
+        let maximum_record = MeasurementRecord {
+            generator: CPU_PROBE_GENERATOR_VERSION.to_owned(),
+            attempt_number: 1,
+            phase: MeasurementPhase::Measured,
+            repetition_index: MAX_CPU_PROBE_RECORDS,
+            sample_index: 1,
+            latency_micros: u64::MAX,
+            time_to_first_token_micros: u64::MAX,
+            throughput_milli_requests_per_second: u64::MAX,
+            successful_requests: u32::MAX,
+            failed_requests: 0,
+        };
+        let serialized_bytes = serde_json::to_vec(&maximum_record)
+            .expect("serialize maximum record")
+            .len()
+            .checked_add(1)
+            .expect("include newline");
+        assert!(serialized_bytes <= MAX_SERIALIZED_RECORD_BYTES);
+        assert_eq!(MAX_ACCEPTED_RECORD_OUTPUT_BYTES, 512_000);
+
+        let mut maximum = config();
+        maximum.warmup_runs = 1;
+        maximum.repetitions = MAX_CPU_PROBE_RECORDS - 1;
+        assert_eq!(
+            expected_record_count(maximum).expect("maximum must fit"),
+            MAX_CPU_PROBE_RECORDS as usize
+        );
+        maximum.repetitions = MAX_CPU_PROBE_RECORDS;
+        assert!(expected_record_count(maximum).is_err());
+    }
+
+    #[test]
     fn spawn_failure_is_a_runtime_failure() {
         let unspawnable = PathBuf::from("benchplane\0cpu-probe");
         let output = execute(&unspawnable, config());
@@ -401,8 +470,10 @@ fn main() {
         Ok("missing") => { record("warmup", 1); record("measured", 1); }
         Ok("duplicate") => { record("warmup", 1); record("warmup", 1); record("measured", 2); }
         Ok("malformed") => println!("not-json"),
+        Ok("partial-malformed") => { record("warmup", 1); println!("not-json"); }
+        Ok("partial-nonzero") => { record("warmup", 1); std::process::exit(7); }
         Ok("nonzero") => { eprintln!("private injected failure"); std::process::exit(7); }
-        Ok("deadline") => thread::sleep(Duration::from_secs(5)),
+        Ok("deadline") => { record("warmup", 1); thread::sleep(Duration::from_secs(5)); }
         _ => std::process::exit(9),
     }
 }
@@ -451,10 +522,32 @@ fn main() {
     }
 
     #[test]
+    fn incomplete_child_protocol_discards_a_valid_record_prefix() {
+        for (mode, code) in [
+            ("partial-nonzero", ERROR_CPU_PROBE_EXIT_FAILED),
+            ("partial-malformed", ERROR_CPU_PROBE_OUTPUT_INVALID),
+        ] {
+            let output = into_execution_output(injected(mode));
+            assert_eq!(output.terminal_state, RunState::Failed, "mode={mode}");
+            assert!(output.measurements.is_empty(), "mode={mode}");
+            assert_eq!(
+                output.failure.expect("failure record").code,
+                code,
+                "mode={mode}"
+            );
+        }
+    }
+
+    #[test]
     fn deadline_terminates_and_reaps_child() {
         let started = Instant::now();
-        let error = injected("deadline").expect_err("deadline must fail");
-        assert_eq!(error.code, ERROR_CPU_PROBE_DEADLINE_EXCEEDED);
+        let output = into_execution_output(injected("deadline"));
+        assert_eq!(output.terminal_state, RunState::Failed);
+        assert!(output.measurements.is_empty());
+        assert_eq!(
+            output.failure.expect("deadline failure").code,
+            ERROR_CPU_PROBE_DEADLINE_EXCEEDED
+        );
         assert!(started.elapsed() < Duration::from_secs(4));
     }
 }

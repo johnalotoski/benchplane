@@ -40,7 +40,8 @@ The implementation is deliberately conservative: it does not provision AWS resou
 experiment YAML
 → strict parsing and semantic validation
 → deterministic resolution and plan identity
-→ deterministic local-fake execution
+→ concrete local runtime execution
+  (deterministic local-fake or measured CPU probe)
 → lifecycle journal, records, measurements, validity, and summary
 → verified evidence finalization
 → same-filesystem atomic publication

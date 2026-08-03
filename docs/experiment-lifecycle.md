@@ -34,7 +34,7 @@ Run state and measurement validity are separate:
 
 Failures use stable codes and are recorded on the terminal event and snapshots. After run allocation, reported persistence and publication errors include the run ID, failure phase, and retained staging path. Diagnostic updates are best effort and never replace the original error.
 
-A successful CPU probe follows `created → preparing → running → collecting → finalizing → succeeded`. Spawn failure, malformed or excessive output, nonzero child exit, or runtime deadline makes the attempt and run `failed`, validity `indeterminate`, and CLI status `4`; normal evidence finalization and publication still proceed when storage works.
+A successful CPU probe follows `created → preparing → running → collecting → finalizing → succeeded`. Spawn failure, malformed or excessive output, nonzero child exit, or runtime deadline makes the attempt and run `failed`, validity `indeterminate`, and CLI status `4`; normal evidence finalization and publication still proceed when storage works. CPU-probe output is accepted only after the complete child protocol succeeds. If the child fails after emitting a valid prefix, that prefix is discarded and the finalized failed evidence contains no CPU-probe measurements.
 
 This slice does not install signal handlers. The `interrupted` local-fake scenario exercises lifecycle and evidence semantics only; it does not demonstrate SIGINT, SIGTERM, process supervision, or host-shutdown behavior. Real signal handling is deferred to a later lifecycle-hardening milestone.
 

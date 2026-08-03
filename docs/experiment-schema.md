@@ -40,7 +40,7 @@ workload:
   concurrency: 1
 ```
 
-`outputTokens` is 1–4,096 and `workUnitsPerToken` is 1–1,000,000. Only concurrency `1` is implemented. Warmups plus repetitions may not exceed 10,000, and their checked product with requests, output tokens, and work units may not overflow or exceed 100,000,000 work units. Positive requests and repetitions, the exact profile, these bounds, and a finite nonnegative local budget are validated before run allocation.
+`outputTokens` is 1–4,096 and `workUnitsPerToken` is 1–1,000,000. Only concurrency `1` is implemented. Warmups plus repetitions may not exceed 1,000, and their checked product with requests, output tokens, and work units may not overflow or exceed 100,000,000 work units. The adapter reserves a 512-byte serialized envelope per record, so the maximum accepted record set occupies at most 512,000 bytes beneath its 1,048,576-byte stdout limit. Positive requests and repetitions, the exact profile, these bounds, and a finite nonnegative local budget are validated before run allocation. The packaged helper independently enforces the same record and work limits.
 
 ## Structural and semantic restrictions
 

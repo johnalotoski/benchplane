@@ -1256,4 +1256,32 @@ mod tests {
         assert!(error.is_request_rejection());
         assert!(!directory.0.join("staging").exists());
     }
+
+    #[test]
+    fn excessive_cpu_probe_records_are_rejected_before_run_id_allocation() {
+        struct PanickingIds;
+        impl RunIdGenerator for PanickingIds {
+            fn next_run_id(&self) -> String {
+                panic!("run ID must not be allocated")
+            }
+        }
+
+        let bytes = b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: excessive-cpu-records }\nspec:\n  provider: { kind: local }\n  runtime: { kind: cpuProbe, outputTokens: 1, workUnitsPerToken: 1 }\n  workload: { profile: cpu-token-probe-v1, requests: 1, concurrency: 1 }\n  measurement: { warmupRuns: 1, repetitions: 1000 }\n  budget: { maximumCostUsd: 0 }\n";
+        let directory = TestDirectory::new("excessive-cpu-records");
+        let error = run_experiment_with_services(
+            bytes,
+            &RunOptions {
+                output_root: directory.0.clone(),
+            },
+            &RunServices {
+                clock: &FixedClock,
+                ids: &PanickingIds,
+                hook: &NoopRunHook,
+                cpu_probe_executable: None,
+            },
+        )
+        .expect_err("excessive records should be rejected");
+        assert!(error.is_request_rejection());
+        assert!(!directory.0.join("staging").exists());
+    }
 }

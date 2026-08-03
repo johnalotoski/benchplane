@@ -2,7 +2,7 @@
 
 use benchplane_schema::{
     MeasurementPhase, MeasurementRecord, CPU_PROBE_GENERATOR_VERSION, MAX_CPU_PROBE_OUTPUT_TOKENS,
-    MAX_CPU_PROBE_TOTAL_WORK_UNITS, MAX_CPU_PROBE_WORK_UNITS_PER_TOKEN,
+    MAX_CPU_PROBE_RECORDS, MAX_CPU_PROBE_TOTAL_WORK_UNITS, MAX_CPU_PROBE_WORK_UNITS_PER_TOKEN,
 };
 use clap::Parser;
 use std::{
@@ -63,6 +63,11 @@ fn validate(args: &Args) -> Result<(), String> {
         .warmup_runs
         .checked_add(args.repetitions)
         .ok_or_else(|| "CPU probe record count overflowed".to_owned())?;
+    if records > MAX_CPU_PROBE_RECORDS {
+        return Err(format!(
+            "CPU probe record count exceeds its {MAX_CPU_PROBE_RECORDS} record public bound"
+        ));
+    }
     let total = u64::from(records)
         .checked_mul(u64::from(args.requests))
         .and_then(|value| value.checked_mul(u64::from(args.output_tokens)))
@@ -182,5 +187,23 @@ mod tests {
         assert!(record.time_to_first_token_micros > 0);
         assert!(record.time_to_first_token_micros <= record.latency_micros);
         assert!(record.throughput_milli_requests_per_second > 0);
+    }
+
+    fn minimal_args(records: u32) -> Args {
+        Args {
+            requests: 1,
+            warmup_runs: 0,
+            repetitions: records,
+            output_tokens: 1,
+            work_units_per_token: 1,
+        }
+    }
+
+    #[test]
+    fn direct_helper_enforces_the_public_record_limit() {
+        assert_eq!(validate(&minimal_args(MAX_CPU_PROBE_RECORDS)), Ok(()));
+        assert!(validate(&minimal_args(MAX_CPU_PROBE_RECORDS + 1))
+            .expect_err("helper must reject a record count above the public maximum")
+            .contains("record count exceeds"));
     }
 }
