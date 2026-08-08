@@ -6,8 +6,8 @@ use crate::{
     execution::{evaluate_validity, summarize},
     lifecycle::{Lifecycle, LifecycleError},
     llama_cpp::{self, LlamaCppConfig},
-    local_fake, parse_experiment, resolve_experiment, verify_evidence_bundle, EvidenceError,
-    ParseError, ResolutionError,
+    local_fake, parse_experiment, provenance, resolve_experiment, verify_evidence_bundle,
+    EvidenceError, ParseError, ResolutionError,
 };
 use benchplane_schema::{
     AttemptRecord, AttemptStatus, EvidenceManifest, FailureRecord, LocalFakeScenario, ProviderSpec,
@@ -250,6 +250,15 @@ fn run_experiment_with_services(
                 services.clock,
                 &attempt_directory,
                 &mut attempt_record,
+            ),
+            "preparing",
+        )?;
+        let provenance = provenance::capture(&run_id, &plan);
+        at(
+            write_json_atomic(
+                &attempt_directory.join("provenance.json"),
+                &provenance,
+                "attempt provenance",
             ),
             "preparing",
         )?;
@@ -787,7 +796,12 @@ fn append_json_line<T: Serialize>(
 mod tests {
     use super::*;
     use crate::{verify_evidence_bundle, EvidenceError};
-    use benchplane_schema::{LocalFakeScenario, MeasurementRecord, ValidityStatus};
+    use benchplane_schema::{
+        AttemptProvenance, LocalFakeScenario, MeasurementRecord, RuntimeProvenance, ValidityStatus,
+        ATTEMPT_PROVENANCE_FORMAT_V1, CPU_PROBE_GENERATOR_VERSION, LLAMA_CPP_ENGINE_VERSION,
+        LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_MODEL_IDENTITY, LLAMA_CPP_MODEL_SHA256,
+        LOCAL_FAKE_GENERATOR_VERSION,
+    };
     use std::{
         cell::Cell,
         collections::BTreeMap,
@@ -935,6 +949,14 @@ mod tests {
         .expect("parse attempt record")
     }
 
+    fn read_provenance(bundle: &Path) -> AttemptProvenance {
+        serde_json::from_slice(
+            &fs::read(bundle.join("attempts/0001/provenance.json"))
+                .expect("read attempt provenance"),
+        )
+        .expect("parse attempt provenance")
+    }
+
     fn directory_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         fn collect(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
             for entry in fs::read_dir(directory).expect("read fixture directory") {
@@ -973,6 +995,26 @@ mod tests {
         assert_eq!(result.validity_status, ValidityStatus::Valid);
         assert_eq!(result.sample_count, 3);
         assert_eq!(read_attempt(&bundle).status, AttemptStatus::Succeeded);
+        let provenance = read_provenance(&bundle);
+        assert_eq!(provenance.format, ATTEMPT_PROVENANCE_FORMAT_V1);
+        assert_eq!(provenance.run_id, FIXED_RUN_ID);
+        assert_eq!(provenance.attempt_number, 1);
+        assert!(!provenance.platform.operating_system.family.is_empty());
+        assert!(!provenance.platform.kernel.name.is_empty());
+        assert!(!provenance.platform.architecture.is_empty());
+        assert_eq!(
+            provenance
+                .platform
+                .cpu
+                .logical_cpu_count
+                .map(|count| count > 0),
+            Some(true)
+        );
+        assert!(matches!(
+            provenance.software.runtime,
+            RuntimeProvenance::LocalFake { ref generator }
+                if generator == LOCAL_FAKE_GENERATOR_VERSION
+        ));
         assert_eq!(
             result.evidence_digest,
             crate::resolution::sha256_digest(
@@ -992,9 +1034,15 @@ mod tests {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/evidence/run-018f6f9a-7b3c-7abc-8def-0123456789ab");
 
+        let mut historical = directory_files(&fixture);
+        historical.remove(Path::new("SHA256SUMS"));
+        let mut generated = directory_files(Path::new(&result.bundle_path));
+        generated.remove(Path::new("SHA256SUMS"));
+        assert!(generated
+            .remove(Path::new("attempts/0001/provenance.json"))
+            .is_some());
         assert_eq!(
-            directory_files(&fixture),
-            directory_files(Path::new(&result.bundle_path)),
+            historical, generated,
             "checked-in evidence fixture must be regenerated from fixed execution"
         );
     }
@@ -1100,6 +1148,11 @@ mod tests {
             read_attempt(Path::new(&result.bundle_path)).status,
             AttemptStatus::Failed
         );
+        assert!(matches!(
+            read_provenance(Path::new(&result.bundle_path)).software.runtime,
+            RuntimeProvenance::CpuProbe { ref generator }
+                if generator == CPU_PROBE_GENERATOR_VERSION
+        ));
         verify_evidence_bundle(Path::new(&result.bundle_path)).expect("failed bundle verifies");
     }
 
@@ -1131,6 +1184,19 @@ mod tests {
             read_attempt(Path::new(&result.bundle_path)).status,
             AttemptStatus::Failed
         );
+        let provenance = read_provenance(Path::new(&result.bundle_path));
+        assert!(matches!(
+            provenance.software.runtime,
+            RuntimeProvenance::LlamaCpp {
+                ref generator,
+                ref engine,
+                ref model,
+                ..
+            } if generator == LLAMA_CPP_GENERATOR_VERSION
+                && engine.version == LLAMA_CPP_ENGINE_VERSION
+                && model.identity == LLAMA_CPP_MODEL_IDENTITY
+                && model.sha256 == LLAMA_CPP_MODEL_SHA256
+        ));
         verify_evidence_bundle(Path::new(&result.bundle_path)).expect("failed bundle verifies");
     }
 

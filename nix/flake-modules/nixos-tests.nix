@@ -151,6 +151,9 @@
               attempt = json.loads(machine.succeed(
                   f"cat {shlex.quote(run_directory + '/attempts/0001/attempt.json')}"
               ))
+              provenance = json.loads(machine.succeed(
+                  f"cat {shlex.quote(run_directory + '/attempts/0001/provenance.json')}"
+              ))
               validity = json.loads(machine.succeed(
                   f"cat {shlex.quote(run_directory + '/validity.json')}"
               ))
@@ -168,6 +171,38 @@
               assert manifest["attemptCount"] == 1
               assert run["runStatus"] == "succeeded"
               assert attempt["status"] == "succeeded"
+              assert provenance["format"] == "benchplane-attempt-provenance/v1"
+              assert provenance["runId"] == run_id
+              assert provenance["attemptNumber"] == 1
+              platform = provenance["platform"]
+              assert platform["operatingSystem"]["family"] == "linux"
+              assert platform["operatingSystem"]["distribution"] == "nixos"
+              assert platform["operatingSystem"]["version"]
+              assert platform["kernel"]["name"]
+              assert platform["kernel"]["release"]
+              assert platform["architecture"] in ("x86_64", "aarch64")
+              assert platform["cpu"]["logicalCpuCount"] > 0
+              if platform["cpu"]["model"] is not None:
+                  assert platform["cpu"]["model"]
+              software = provenance["software"]
+              assert software["benchplane"] == {
+                  "name": "benchplane",
+                  "version": "0.1.0",
+                  "nixStorePath": ${builtins.toJSON (toString benchplane)},
+              }
+              runtime = software["runtime"]
+              assert runtime["kind"] == "llamaCpp"
+              assert runtime["generator"] == "benchplane-llama-cpp-smollm2/v1"
+              assert runtime["engine"]["name"] == "llama.cpp"
+              assert runtime["engine"]["version"] == "b10133"
+              assert runtime["model"]["identity"] == "smollm2-135m-instruct-q2-k-v1"
+              assert runtime["model"]["sha256"] == "sha256:55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75"
+              assert runtime["backend"]["identity"] == "nixpkgs-llama-cpp-cpu-only-dynamic/v1"
+              assert runtime["backend"]["deviceClass"] == "cpu"
+              nix_store_pattern = r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/]+"
+              assert re.fullmatch(nix_store_pattern, runtime["engine"]["nixStorePath"])
+              assert re.fullmatch(nix_store_pattern, runtime["model"]["nixStorePath"])
+              assert runtime["backend"]["nixStorePath"] == runtime["engine"]["nixStorePath"]
               assert validity["status"] == "valid"
               assert validity["observedSamples"] == 1
               assert summary["attemptCount"] == 1
@@ -182,6 +217,9 @@
               assert re.fullmatch(digest_pattern, manifest["experimentDigest"])
               assert re.fullmatch(digest_pattern, manifest["resolvedPlanDigest"])
               machine.succeed(f"test -s {shlex.quote(run_directory + '/SHA256SUMS')}")
+              machine.succeed(
+                  f"grep -F '  attempts/0001/provenance.json' {shlex.quote(run_directory + '/SHA256SUMS')}"
+              )
 
               measurements = machine.succeed(
                   f"cat {shlex.quote(run_directory + '/attempts/0001/measurements.jsonl')}"

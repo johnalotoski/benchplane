@@ -3,6 +3,14 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub const ATTEMPT_PROVENANCE_FORMAT_V1: &str = "benchplane-attempt-provenance/v1";
+pub const BENCHPLANE_SOFTWARE_NAME: &str = "benchplane";
+pub const LLAMA_CPP_ENGINE_NAME: &str = "llama.cpp";
+pub const LLAMA_CPP_ENGINE_VERSION: &str = "b10133";
+pub const LLAMA_CPP_MODEL_SHA256: &str =
+    "sha256:55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75";
+pub const LLAMA_CPP_BACKEND_IDENTITY: &str = "nixpkgs-llama-cpp-cpu-only-dynamic/v1";
+
 pub const ERROR_LOCAL_FAKE_RUNTIME_FAILURE: &str = "localFake.runtimeFailure";
 pub const ERROR_LOCAL_FAKE_INTERRUPTED: &str = "localFake.interrupted";
 pub const ERROR_EVIDENCE_FINALIZATION_FAILED: &str = "evidence.finalizationFailed";
@@ -116,6 +124,106 @@ pub struct AttemptRecord {
     pub updated_at: String,
     pub completed_at: Option<String>,
     pub failure: Option<FailureRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttemptProvenance {
+    pub format: String,
+    pub run_id: String,
+    pub attempt_number: u32,
+    pub platform: PlatformProvenance,
+    pub software: SoftwareProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformProvenance {
+    pub operating_system: OperatingSystemProvenance,
+    pub kernel: KernelProvenance,
+    pub architecture: String,
+    pub cpu: CpuProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperatingSystemProvenance {
+    pub family: String,
+    pub distribution: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelProvenance {
+    pub name: String,
+    pub release: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CpuProvenance {
+    pub model: Option<String>,
+    pub logical_cpu_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SoftwareProvenance {
+    pub benchplane: SoftwareComponentProvenance,
+    pub runtime: RuntimeProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SoftwareComponentProvenance {
+    pub name: String,
+    pub version: String,
+    pub nix_store_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum RuntimeProvenance {
+    LocalFake {
+        generator: String,
+    },
+    CpuProbe {
+        generator: String,
+    },
+    LlamaCpp {
+        generator: String,
+        engine: SoftwareComponentProvenance,
+        model: ModelProvenance,
+        backend: BackendProvenance,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelProvenance {
+    pub identity: String,
+    pub sha256: String,
+    pub nix_store_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackendProvenance {
+    pub identity: String,
+    pub device_class: DeviceClass,
+    pub nix_store_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceClass {
+    Cpu,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

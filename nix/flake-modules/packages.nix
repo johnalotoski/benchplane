@@ -73,6 +73,11 @@
 
         cargoLock.lockFile = ../../Cargo.lock;
 
+        env = {
+          BENCHPLANE_LLAMA_CPP_NIX_STORE_PATH = toString llamaCppCpu;
+          BENCHPLANE_SMOLLM2_NIX_STORE_PATH = toString smolLm2Model;
+        };
+
         meta = {
           description = "Reproducible AI systems experiments, from specification to evidence";
           homepage = "https://github.com/johnalotoski/benchplane";
@@ -247,6 +252,22 @@
           ${pkgs.jq}/bin/jq -e \
             '.runState == "succeeded" and .validityStatus == "valid"' \
             result.json > /dev/null
+          ${pkgs.jq}/bin/jq -e \
+            --arg runId "$(${pkgs.jq}/bin/jq -er '.runId' result.json)" \
+            --arg benchplaneStore '${benchplane}' \
+            '.format == "benchplane-attempt-provenance/v1" and
+             .runId == $runId and .attemptNumber == 1 and
+             (.platform.operatingSystem.family | length > 0) and
+             (.platform.kernel.name | length > 0) and
+             (.platform.architecture | length > 0) and
+             (.platform.cpu.logicalCpuCount == null or .platform.cpu.logicalCpuCount > 0) and
+             .software.benchplane.name == "benchplane" and
+             .software.benchplane.version == "0.1.0" and
+             .software.benchplane.nixStorePath == $benchplaneStore and
+             .software.runtime.kind == "localFake" and
+             .software.runtime.generator == "benchplane-local-fake/v1"' \
+            "$bundle/attempts/0001/provenance.json" > /dev/null
+          grep -F '  attempts/0001/provenance.json' "$bundle/SHA256SUMS" > /dev/null
           test -d "$bundle"
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
           mkdir $out
@@ -264,6 +285,22 @@
           ${pkgs.jq}/bin/jq -e -s \
             'length == 4 and all(.generator == "benchplane-cpu-probe/v1")' \
             "$bundle/attempts/0001/measurements.jsonl" > /dev/null
+          ${pkgs.jq}/bin/jq -e \
+            --arg runId "$(${pkgs.jq}/bin/jq -er '.runId' result.json)" \
+            --arg benchplaneStore '${benchplane}' \
+            '.format == "benchplane-attempt-provenance/v1" and
+             .runId == $runId and .attemptNumber == 1 and
+             (.platform.operatingSystem.family | length > 0) and
+             (.platform.kernel.name | length > 0) and
+             (.platform.architecture | length > 0) and
+             (.platform.cpu.logicalCpuCount == null or .platform.cpu.logicalCpuCount > 0) and
+             .software.benchplane.name == "benchplane" and
+             .software.benchplane.version == "0.1.0" and
+             .software.benchplane.nixStorePath == $benchplaneStore and
+             .software.runtime.kind == "cpuProbe" and
+             .software.runtime.generator == "benchplane-cpu-probe/v1"' \
+            "$bundle/attempts/0001/provenance.json" > /dev/null
+          grep -F '  attempts/0001/provenance.json' "$bundle/SHA256SUMS" > /dev/null
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
           mkdir $out
           cp result.json verified.txt $out/
@@ -325,6 +362,16 @@
           (
             cd "$ambientCwd"
             GGML_BACKEND_PATH="$ambientCwd/libggml-cuda.so" \
+              ${benchplane}/bin/benchplane-llama-cpp \
+                --requests 1 --warmup-runs 0 --repetitions 1 --output-tokens 1 \
+                > "$TMPDIR/direct-helper.jsonl"
+          )
+          ${pkgs.jq}/bin/jq -e -s \
+            'length == 1 and all(.generator == "benchplane-llama-cpp-smollm2/v1") and all(.phase == "measured" and .repetitionIndex == 1 and .latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros and .throughputMilliRequestsPerSecond > 0 and .successfulRequests == 1 and .failedRequests == 0)' \
+            "$TMPDIR/direct-helper.jsonl" > /dev/null
+          (
+            cd "$ambientCwd"
+            GGML_BACKEND_PATH="$ambientCwd/libggml-cuda.so" \
               ${benchplane}/bin/benchplane run ${../../experiments/smoke/local-llama-cpp.yaml} \
                 --output-root "$outputRoot" --json > "$resultFile"
           )
@@ -335,6 +382,33 @@
           ${pkgs.jq}/bin/jq -e -s \
             'length == 4 and all(.generator == "benchplane-llama-cpp-smollm2/v1") and all(.latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros and .throughputMilliRequestsPerSecond > 0 and .successfulRequests == 2 and .failedRequests == 0)' \
             "$bundle/attempts/0001/measurements.jsonl" > /dev/null
+          ${pkgs.jq}/bin/jq -e \
+            --arg runId "$(${pkgs.jq}/bin/jq -er '.runId' "$resultFile")" \
+            --arg benchplaneStore '${benchplane}' \
+            --arg llamaStore '${llamaCppCpu}' \
+            --arg modelStore '${smolLm2Model}' \
+            '.format == "benchplane-attempt-provenance/v1" and
+             .runId == $runId and .attemptNumber == 1 and
+             (.platform.operatingSystem.family | length > 0) and
+             (.platform.kernel.name | length > 0) and
+             (.platform.architecture | length > 0) and
+             (.platform.cpu.logicalCpuCount == null or .platform.cpu.logicalCpuCount > 0) and
+             .software.benchplane.name == "benchplane" and
+             .software.benchplane.version == "0.1.0" and
+             .software.benchplane.nixStorePath == $benchplaneStore and
+             .software.runtime.kind == "llamaCpp" and
+             .software.runtime.generator == "benchplane-llama-cpp-smollm2/v1" and
+             .software.runtime.engine.name == "llama.cpp" and
+             .software.runtime.engine.version == "b10133" and
+             .software.runtime.engine.nixStorePath == $llamaStore and
+             .software.runtime.model.identity == "smollm2-135m-instruct-q2-k-v1" and
+             .software.runtime.model.sha256 == "sha256:55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75" and
+             .software.runtime.model.nixStorePath == $modelStore and
+             .software.runtime.backend.identity == "nixpkgs-llama-cpp-cpu-only-dynamic/v1" and
+             .software.runtime.backend.deviceClass == "cpu" and
+             .software.runtime.backend.nixStorePath == $llamaStore' \
+            "$bundle/attempts/0001/provenance.json" > /dev/null
+          grep -F '  attempts/0001/provenance.json' "$bundle/SHA256SUMS" > /dev/null
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
           mkdir $out
           cp "$resultFile" $out/result.json

@@ -9,8 +9,9 @@ human-authored experiment
 benchplane-schema ── strict public experiment and evidence records
         │
         ▼
-benchplane-core ─── parsing, resolution, lifecycle, execution, validity,
-                    summaries, evidence writing, and verification
+benchplane-core ─── parsing, resolution, lifecycle, attempt provenance,
+                    execution, validity, summaries, evidence writing,
+                    and verification
         │
         ▼
 benchplane CLI ───── thin command dispatch and human/JSON presentation
@@ -28,7 +29,7 @@ systemctl start → NixOS oneshot service → benchplane run → benchplane-core
 
 The service supplies a pinned package containing the CLI, both helpers, CPU-only llama.cpp, and the fixed GGUF model, plus a read-only experiment path, persistent output root, unprivileged identity, and systemd activation timeout. The CLI resolves helpers beside its own executable, so execution does not depend on ambient `PATH`; the inference helper reads its model through a compiled immutable Nix-store reference. The service does not introduce a daemon, RPC endpoint, queue, database, or controller-to-runner protocol. Explicit activation is an orchestration boundary: the unit is not boot-enabled, and every completed activation leaves the oneshot inactive so a later explicit start is a new run.
 
-Run lifecycle, attempt outcome, measurement validity, and evidence publication are separate concerns. An attempt becomes terminal when concrete execution returns; collection and finalization belong to the enclosing run. Evidence format v1 deliberately contains one attempt and provides neither retry nor resume semantics.
+Run lifecycle, attempt provenance, attempt outcome, measurement validity, and evidence publication are separate concerns. After entering attempt preparation, Benchplane records a bounded allowlist of platform and software facts beneath that attempt before concrete execution starts. Provenance is not run-global: a future retry design could execute another attempt on a different host or package. An attempt becomes terminal when concrete execution returns; collection and finalization belong to the enclosing run. Evidence format v1 deliberately contains one attempt and provides neither retry nor resume semantics.
 
 Infrastructure and node configuration are implementation surfaces around the core lifecycle:
 
