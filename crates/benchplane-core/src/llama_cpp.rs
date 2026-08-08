@@ -34,7 +34,8 @@ pub(crate) fn execute(executable: &Path, config: LlamaCppConfig) -> ExecutionOut
     let mut command = Command::new(executable);
     // The fixed runtime needs no ambient configuration. In particular, clearing
     // the environment prevents loader and ggml backend variables from changing
-    // the packaged executable/library boundary or measured work.
+    // the packaged executable/library boundary or measured work. The helper also
+    // passes its compiled package-owned directory to ggml's explicit-path loader.
     command.env_clear();
     into_execution_output(execute_command(command, config))
 }

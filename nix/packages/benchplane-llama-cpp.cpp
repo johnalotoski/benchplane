@@ -16,6 +16,10 @@
 #error "BENCHPLANE_MODEL_PATH must name the immutable packaged GGUF model"
 #endif
 
+#ifndef BENCHPLANE_BACKEND_PATH
+#error "BENCHPLANE_BACKEND_PATH must name the immutable packaged ggml backend directory"
+#endif
+
 namespace {
 
 constexpr uint32_t kMaxRecords = 16;
@@ -106,10 +110,19 @@ std::string prompt_for(uint32_t request_index) {
            ": name a color.<|im_end|>\n<|im_start|>assistant\n";
 }
 
-uint64_t ceil_micros(std::chrono::nanoseconds duration) {
-    const uint64_t nanos = static_cast<uint64_t>(duration.count());
-    return std::max<uint64_t>(1, (nanos + 999) / 1000);
+constexpr uint64_t ceil_mean_micros(uint64_t total_nanos, uint32_t count) {
+    if (count == 0) {
+        return 1;
+    }
+    const uint64_t divisor = static_cast<uint64_t>(count) * 1000;
+    const uint64_t quotient = total_nanos / divisor;
+    const uint64_t rounded = quotient + (total_nanos % divisor != 0 ? 1 : 0);
+    return std::max<uint64_t>(1, rounded);
 }
+
+static_assert(ceil_mean_micros(2000, 2) == 1);
+static_assert(ceil_mean_micros(2001, 2) == 2);
+static_assert(ceil_mean_micros(1, std::numeric_limits<uint32_t>::max()) == 1);
 
 bool run_request(
     llama_model * model,
@@ -193,10 +206,11 @@ bool emit_repetition(
         total_ttft += ttft;
     }
     const auto repetition_elapsed = std::chrono::steady_clock::now() - repetition_started;
-    const uint64_t latency_micros =
-        std::max<uint64_t>(1, ceil_micros(total_latency) / args.requests);
+    const uint64_t latency_micros = ceil_mean_micros(
+        static_cast<uint64_t>(total_latency.count()), args.requests);
     const uint64_t ttft_micros = std::min(
-        latency_micros, std::max<uint64_t>(1, ceil_micros(total_ttft) / args.requests));
+        latency_micros,
+        ceil_mean_micros(static_cast<uint64_t>(total_ttft.count()), args.requests));
     const uint64_t elapsed_nanos =
         std::max<uint64_t>(1, static_cast<uint64_t>(repetition_elapsed.count()));
     const uint64_t throughput = std::max<uint64_t>(
@@ -227,7 +241,7 @@ int main(int argc, char ** argv) {
         return kUsageExit;
     }
 
-    ggml_backend_load_all();
+    ggml_backend_load_all_from_path(BENCHPLANE_BACKEND_PATH);
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = 0;
     llama_model * model = llama_model_load_from_file(BENCHPLANE_MODEL_PATH, model_params);
