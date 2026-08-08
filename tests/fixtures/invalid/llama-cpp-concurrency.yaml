@@ -1,0 +1,8 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata: { name: concurrent-llama }
+spec:
+  provider: { kind: local }
+  runtime: { kind: llamaCpp }
+  workload: { profile: smollm2-chat-greedy-v1, requests: 1, concurrency: 2 }
+  budget: { maximumCostUsd: 0 }

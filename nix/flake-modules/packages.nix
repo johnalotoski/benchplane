@@ -15,7 +15,58 @@
         ];
       };
 
-      benchplane = pkgs.rustPlatform.buildRustPackage {
+      smolLm2Model = pkgs.fetchurl {
+        name = "SmolLM2-135M-Instruct.Q2_K.gguf";
+        url = "https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF/resolve/c33bd7b3a0c1c5048af630f0198eb2a29977b422/SmolLM2-135M-Instruct.Q2_K.gguf?download=true";
+        hash = "sha256-VaqI3axDrc5q8Om+jWzf8jN6ODXNm1C7zXqJTrZt/HU=";
+      };
+
+      llamaCppCpu = pkgs.llama-cpp.override {
+        cudaSupport = false;
+        rocmSupport = false;
+        openclSupport = false;
+        vulkanSupport = false;
+        metalSupport = false;
+        rpcSupport = false;
+      };
+
+      ambientBackendSentinel =
+        pkgs.runCommand "benchplane-ambient-ggml-backend-sentinel"
+          { nativeBuildInputs = [ pkgs.stdenv.cc ]; }
+          ''
+            mkdir -p $out/bin $out/lib
+            $CC -shared -fPIC ${../packages/ambient-ggml-backend-sentinel.c} \
+              -o $out/lib/libggml-cuda.so
+            $CXX -std=c++17 -Wall -Wextra -Werror \
+              -I${llamaCppCpu.dev}/include \
+              -L${llamaCppCpu}/lib -Wl,-rpath,${llamaCppCpu}/lib \
+              ${../packages/ambient-ggml-default-loader.cpp} -lggml \
+              -o $out/bin/ambient-ggml-default-loader
+          '';
+
+      llamaCppHelper = pkgs.stdenv.mkDerivation {
+        pname = "benchplane-llama-cpp-helper";
+        version = "1";
+        dontUnpack = true;
+        buildPhase = ''
+          runHook preBuild
+          $CXX -std=c++17 -O2 -Wall -Wextra -Werror \
+            -DBENCHPLANE_MODEL_PATH='"${smolLm2Model}"' \
+            -DBENCHPLANE_BACKEND_PATH='"${llamaCppCpu}/bin"' \
+            -I${llamaCppCpu.dev}/include \
+            -L${llamaCppCpu}/lib -Wl,-rpath,${llamaCppCpu}/lib \
+            ${../packages/benchplane-llama-cpp.cpp} -lllama -lggml -pthread \
+            -o benchplane-llama-cpp
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          install -Dm755 benchplane-llama-cpp $out/bin/benchplane-llama-cpp
+          runHook postInstall
+        '';
+      };
+
+      benchplaneRust = pkgs.rustPlatform.buildRustPackage {
         pname = "benchplane";
         version = "0.1.0";
         src = source;
@@ -27,6 +78,35 @@
           homepage = "https://github.com/johnalotoski/benchplane";
           license = inputs.nixpkgs.lib.licenses.asl20;
           mainProgram = "benchplane";
+        };
+      };
+
+      benchplane = pkgs.symlinkJoin {
+        name = "benchplane-0.1.0";
+        paths = [
+          benchplaneRust
+          llamaCppHelper
+        ];
+        postBuild = ''
+          # `current_exe` must remain inside this combined package so sibling
+          # helper discovery cannot resolve back through a symlink to the Rust-only output.
+          cp --remove-destination ${benchplaneRust}/bin/benchplane $out/bin/benchplane
+          cp --remove-destination ${benchplaneRust}/bin/benchplane-cpu-probe $out/bin/benchplane-cpu-probe
+          cp --remove-destination ${llamaCppHelper}/bin/benchplane-llama-cpp $out/bin/benchplane-llama-cpp
+          mkdir -p $out/share/benchplane/models
+          ln -s ${smolLm2Model} $out/share/benchplane/models/SmolLM2-135M-Instruct.Q2_K.gguf
+          install -Dm444 ${../packages/THIRD_PARTY_NOTICES.md} \
+            $out/share/doc/benchplane/THIRD_PARTY_NOTICES.md
+          install -Dm444 ${../../LICENSE} \
+            $out/share/licenses/benchplane/Apache-2.0.txt
+          install -Dm444 ${../../NOTICE} $out/share/doc/benchplane/NOTICE
+        '';
+        meta = benchplaneRust.meta // {
+          # Benchplane and the model are Apache-2.0; llama.cpp is MIT.
+          license = with inputs.nixpkgs.lib.licenses; [
+            asl20
+            mit
+          ];
         };
       };
 
@@ -187,6 +267,78 @@
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
           mkdir $out
           cp result.json verified.txt $out/
+        '';
+
+        llama-cpp-package-assets = pkgs.runCommand "benchplane-llama-cpp-package-assets" { } ''
+          test -x ${benchplane}/bin/benchplane
+          test -x ${benchplane}/bin/benchplane-cpu-probe
+          test -x ${benchplane}/bin/benchplane-llama-cpp
+          test ! -e ${benchplane}/bin/llama-cli
+          for packagedBackend in ${benchplane}/bin/libggml-*.so; do
+            test ! -e "$packagedBackend"
+          done
+          backendCount=0
+          sawBlas=0
+          sawCpu=0
+          for backend in ${llamaCppCpu}/bin/libggml-*.so; do
+            backendCount=$((backendCount + 1))
+            case "$(basename "$backend")" in
+              libggml-blas.so) sawBlas=1 ;;
+              libggml-cpu*.so) sawCpu=1 ;;
+              *)
+                echo "unexpected non-CPU ggml backend: $backend" >&2
+                exit 1
+                ;;
+            esac
+          done
+          test "$backendCount" -gt 0
+          test "$sawBlas" = 1
+          test "$sawCpu" = 1
+          test -r ${benchplane}/share/benchplane/models/SmolLM2-135M-Instruct.Q2_K.gguf
+          test -r ${benchplane}/share/doc/benchplane/THIRD_PARTY_NOTICES.md
+          test -r ${benchplane}/share/licenses/benchplane/Apache-2.0.txt
+          test -r ${benchplane}/share/doc/benchplane/NOTICE
+          test "$(stat -Lc %s ${benchplane}/share/benchplane/models/SmolLM2-135M-Instruct.Q2_K.gguf)" = 88201792
+          if ${benchplane}/bin/benchplane-llama-cpp --requests 100 --warmup-runs 1 --repetitions 3 --output-tokens 4; then
+            exit 1
+          fi
+          touch $out
+        '';
+
+        llama-cpp-lifecycle-smoke = pkgs.runCommand "benchplane-llama-cpp-lifecycle-smoke" { } ''
+          outputRoot="$TMPDIR/benchplane-output"
+          resultFile="$TMPDIR/result.json"
+          ambientCwd="$TMPDIR/ambient-backend"
+          mkdir "$ambientCwd"
+          ln -s ${ambientBackendSentinel}/lib/libggml-cuda.so \
+            "$ambientCwd/libggml-cuda.so"
+          # Calibrate the sentinel against b10133's default CWD search before
+          # proving the packaged explicit-path invocation ignores it.
+          set +e
+          (
+            cd "$ambientCwd"
+            ${ambientBackendSentinel}/bin/ambient-ggml-default-loader
+          )
+          sentinelStatus=$?
+          set -e
+          test "$sentinelStatus" = 86
+          (
+            cd "$ambientCwd"
+            GGML_BACKEND_PATH="$ambientCwd/libggml-cuda.so" \
+              ${benchplane}/bin/benchplane run ${../../experiments/smoke/local-llama-cpp.yaml} \
+                --output-root "$outputRoot" --json > "$resultFile"
+          )
+          bundle="$(${pkgs.jq}/bin/jq -er '.bundlePath' "$resultFile")"
+          ${pkgs.jq}/bin/jq -e \
+            '.runState == "succeeded" and .validityStatus == "valid"' \
+            "$resultFile" > /dev/null
+          ${pkgs.jq}/bin/jq -e -s \
+            'length == 4 and all(.generator == "benchplane-llama-cpp-smollm2/v1") and all(.latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros and .throughputMilliRequestsPerSecond > 0 and .successfulRequests == 2 and .failedRequests == 0)' \
+            "$bundle/attempts/0001/measurements.jsonl" > /dev/null
+          ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
+          mkdir $out
+          cp "$resultFile" $out/result.json
+          cp verified.txt $out/
         '';
       };
     };

@@ -1,0 +1,8 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata: { name: wrong-profile }
+spec:
+  provider: { kind: local }
+  runtime: { kind: llamaCpp }
+  workload: { profile: arbitrary-prompt, requests: 1 }
+  budget: { maximumCostUsd: 0 }

@@ -10,7 +10,7 @@ fmt:
 fmt-check:
     treefmt --fail-on-change
 
-check: fmt-check schema-check local-smoke cpu-probe-smoke
+check: fmt-check schema-check local-smoke cpu-probe-smoke llama-cpp-smoke
     actionlint
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo test --workspace --all-features
@@ -40,6 +40,10 @@ cpu-probe-smoke:
           and .throughputMilliRequestsPerSecond > 0)' \
         "$bundle/attempts/0001/measurements.jsonl" > /dev/null; \
       cargo run --quiet -p benchplane -- evidence verify "$bundle" > /dev/null
+
+llama-cpp-smoke:
+    system="$(nix eval --impure --raw --expr builtins.currentSystem)"; \
+      nix build ".#checks.$system.llama-cpp-lifecycle-smoke" --print-build-logs
 
 nixos-runner-test:
     system="$(nix eval --impure --raw --expr builtins.currentSystem)"; \

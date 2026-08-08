@@ -21,7 +21,7 @@ Many individual pieces already exist: vLLM packaging, NixOS GPU support, cloud p
 
 ## Current status
 
-This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, execute either deterministic local-fake work or a measured local CPU token probe, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
+This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, execute deterministic local-fake work, a measured local CPU token probe, or real packaged CPU-only model inference, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
 
 It also establishes the intended boundaries for:
 
@@ -32,7 +32,7 @@ It also establishes the intended boundaries for:
 - experiment definitions, studies, and evidence references;
 - CI, formatting, security, and architectural decisions.
 
-The implementation is deliberately conservative: it does not provision AWS resources, execute the declarative vLLM variant, run a model or GPU workload, handle parent operating-system signals, resume a run, or retry an attempt. Local-fake records and CPU-probe records and work are explicitly bounded before a run ID is allocated.
+The implementation is deliberately conservative: it does not provision AWS resources, execute the declarative vLLM variant, run a GPU workload, handle parent operating-system signals, resume a run, or retry an attempt. Every local runtime's records and work are explicitly bounded before a run ID is allocated.
 
 ## Local execution
 
@@ -41,7 +41,7 @@ experiment YAML
 → strict parsing and semantic validation
 → deterministic resolution and plan identity
 → concrete local runtime execution
-  (deterministic local-fake or measured CPU probe)
+  (deterministic local-fake, measured CPU probe, or packaged llama.cpp inference)
 → lifecycle journal, records, measurements, validity, and summary
 → verified evidence finalization
 → same-filesystem atomic publication
@@ -52,9 +52,14 @@ Run the cost-free, self-contained smoke experiment with:
 ```console
 benchplane run experiments/smoke/local-fake.yaml
 benchplane run experiments/smoke/local-cpu-probe.yaml
+benchplane run experiments/smoke/local-llama-cpp.yaml
 ```
 
 The CPU probe starts the fixed `benchplane-cpu-probe` executable from the same package without a shell. It performs deterministic, data-dependent CPU work and records observed request latency, first-output latency, and request throughput. Timing varies by host and proves only local CPU execution, subprocess supervision, and inference-shaped measurement plumbing—not model, GPU, vLLM, cross-host, or production inference performance.
+
+The `llamaCpp` runtime starts the package-owned `benchplane-llama-cpp` helper without a shell. It uses CPU-only llama.cpp `b10133` to load the fixed [SmolLM2-135M-Instruct Q2_K GGUF](https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF) from the Nix store and perform greedy transformer decoding. The Apache-2.0 model file is exactly 88,201,792 bytes and is pinned at repository commit `c33bd7b3a0c1c5048af630f0198eb2a29977b422` with SHA-256 `55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75`; llama.cpp is MIT-licensed. No model download, network, home directory, credential, GPU, container, arbitrary model path, or arbitrary prompt is used at execution time.
+
+This tiny quantized fixture is suitable for routine x86-64 and aarch64 CI because it is a real but unusually small 135M-parameter model. It proves actual local model execution and measurement plumbing only. It is not representative of production inference, model quality, cross-host performance, GPU behavior, vLLM behavior, or cloud lifecycle.
 
 The default output root is `.benchplane`; use `--output-root PATH` to select another same-filesystem staging and publication root, and `--json` for one machine-readable result object. The original YAML bytes and the normalized experiment and resolved-plan digests are all retained in the bundle.
 
@@ -64,7 +69,7 @@ The first cloud milestone may later extend this path to one single-GPU vLLM expe
 
 The NixOS module defines an explicitly activated `benchplane-runner.service`. It invokes the configured package's public `benchplane run` command as an unprivileged system user and stores staging data and published runs beneath the systemd-managed `/var/lib/benchplane` state directory. It is not attached to `multi-user.target`: each intentional `systemctl start benchplane-runner.service` invocation creates one new run.
 
-See [`docs/nixos-runner.md`](docs/nixos-runner.md) for module options, operation, exit behavior, timeout semantics, and security boundaries. The flake includes a cost-free NixOS VM integration test using only local compute resources; it needs no cloud account, GPU, model, container runtime, external runtime service, or runtime network access.
+See [`docs/nixos-runner.md`](docs/nixos-runner.md) for module options, operation, exit behavior, timeout semantics, and security boundaries. The flake includes a cost-free NixOS VM integration test using only local compute resources; its model is already in the immutable package closure, so it needs no cloud account, GPU, container runtime, external runtime service, runtime model download, or runtime network access.
 
 ## Repository map
 
@@ -94,6 +99,7 @@ just fmt
 just check
 just local-smoke
 just cpu-probe-smoke
+just llama-cpp-smoke
 just nixos-runner-test
 just tofu-validate
 ```

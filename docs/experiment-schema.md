@@ -42,6 +42,26 @@ workload:
 
 `outputTokens` is 1–4,096 and `workUnitsPerToken` is 1–1,000,000. Only concurrency `1` is implemented. Warmups plus repetitions may not exceed 1,000, and their checked product with requests, output tokens, and work units may not overflow or exceed 100,000,000 work units. The adapter reserves a 512-byte serialized envelope per record, so the maximum accepted record set occupies at most 512,000 bytes beneath its 1,048,576-byte stdout limit. Positive requests and repetitions, the exact profile, these bounds, and a finite nonnegative local budget are validated before run allocation. The packaged helper independently enforces the same record and work limits.
 
+## Packaged llama.cpp controls
+
+The real-model combination is provider `local` with runtime `llamaCpp`. It accepts only model identity `smollm2-135m-instruct-q2-k-v1` and workload profile `smollm2-chat-greedy-v1`:
+
+```yaml
+provider: { kind: local }
+runtime:
+  kind: llamaCpp
+  model: smollm2-135m-instruct-q2-k-v1
+  outputTokens: 4
+workload:
+  profile: smollm2-chat-greedy-v1
+  requests: 2
+  concurrency: 1
+```
+
+`model` defaults to the fixed identity and `outputTokens` defaults to `4`; explicit values are retained in the resolved experiment. Generated tokens must be 1–32 and concurrency must equal `1`. Warmups plus measured repetitions may not exceed 16. The checked product `(warmups + repetitions) × requests × (96 maximum fixed-profile prompt tokens + outputTokens)` may not overflow or exceed 8,192 prompt-plus-generated tokens. Requests and repetitions must be positive, the lifecycle maximum remains 1–86,400 seconds, and the local budget must be finite and nonnegative. All semantic checks and provider/runtime compatibility selection occur before UUIDv7 allocation or output-root creation. The package-owned helper independently enforces the record, output-token, prompt-token, and total-token bounds.
+
+No public field can select an executable, model path, model URL/repository/revision, prompt, environment, working directory, network address, sampler, thread count, or general llama.cpp option. Request-index variation is derived deterministically inside the fixed profile.
+
 ## Structural and semantic restrictions
 
 The generated JSON Schema expresses the document structure, required properties, primitive types, tagged provider/runtime variants, defaults, and closed objects. Unknown properties are rejected at the top level and at each nested object or tagged-variant boundary. `metadata.labels` is intentionally an open string-to-string map.
@@ -60,4 +80,4 @@ This representation is deterministic for this implementation, but it is not a st
 
 `resolvedPlanDigest` is SHA-256 over deterministic `serde_json` serialization of the resolved-plan content: API version, kind, fully parsed/defaulted experiment, and `experimentDigest`. The `resolvedPlanDigest` field itself is excluded from its input. Both digests are stored in the resolved plan, run record, evidence manifest, summary, and terminal CLI result.
 
-CPU-probe plan identity is deterministic, but its monotonic-clock measurements are observations and intentionally vary between executions and hosts.
+CPU-probe and llama.cpp plan identities are deterministic, but their monotonic-clock measurements are observations and intentionally vary between executions and hosts.

@@ -13,6 +13,11 @@ pub const ERROR_CPU_PROBE_SPAWN_FAILED: &str = "cpuProbe.spawnFailed";
 pub const ERROR_CPU_PROBE_EXIT_FAILED: &str = "cpuProbe.exitFailed";
 pub const ERROR_CPU_PROBE_OUTPUT_INVALID: &str = "cpuProbe.outputInvalid";
 pub const ERROR_CPU_PROBE_DEADLINE_EXCEEDED: &str = "cpuProbe.deadlineExceeded";
+pub const ERROR_LLAMA_CPP_SPAWN_FAILED: &str = "llamaCpp.spawnFailed";
+pub const ERROR_LLAMA_CPP_MODEL_INIT_FAILED: &str = "llamaCpp.modelInitFailed";
+pub const ERROR_LLAMA_CPP_EXIT_FAILED: &str = "llamaCpp.exitFailed";
+pub const ERROR_LLAMA_CPP_OUTPUT_INVALID: &str = "llamaCpp.outputInvalid";
+pub const ERROR_LLAMA_CPP_DEADLINE_EXCEEDED: &str = "llamaCpp.deadlineExceeded";
 
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,

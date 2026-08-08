@@ -278,6 +278,30 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "llamaCpp"
+            },
+            "model": {
+              "type": "string",
+              "default": "smollm2-135m-instruct-q2-k-v1"
+            },
+            "outputTokens": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 4,
+              "maximum": 32,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "arguments": {
               "type": "array",
               "default": [],
