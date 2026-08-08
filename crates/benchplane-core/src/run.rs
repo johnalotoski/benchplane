@@ -5,6 +5,7 @@ use crate::{
     evidence::write_checksum_file,
     execution::{evaluate_validity, summarize},
     lifecycle::{Lifecycle, LifecycleError},
+    llama_cpp::{self, LlamaCppConfig},
     local_fake, parse_experiment, resolve_experiment, verify_evidence_bundle, EvidenceError,
     ParseError, ResolutionError,
 };
@@ -142,6 +143,7 @@ struct RunServices<'a> {
     ids: &'a dyn RunIdGenerator,
     hook: &'a dyn RunHook,
     cpu_probe_executable: Option<&'a Path>,
+    llama_cpp_executable: Option<&'a Path>,
 }
 
 pub fn run_experiment(
@@ -159,6 +161,7 @@ pub fn run_experiment(
             ids: &ids,
             hook: &hook,
             cpu_probe_executable: None,
+            llama_cpp_executable: None,
         },
     )
 }
@@ -283,6 +286,13 @@ fn run_experiment_with_services(
                     .map(Path::to_path_buf)
                     .unwrap_or_else(packaged_cpu_probe_executable);
                 cpu_probe::execute(&executable, config)
+            }
+            ExecutionKind::LlamaCpp(config) => {
+                let executable = services
+                    .llama_cpp_executable
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(packaged_llama_cpp_executable);
+                llama_cpp::execute(&executable, config)
             }
         };
         let attempt_terminal = match execution.terminal_state {
@@ -501,6 +511,7 @@ enum ExecutionKind {
         scenario: LocalFakeScenario,
     },
     CpuProbe(CpuProbeConfig),
+    LlamaCpp(LlamaCppConfig),
 }
 
 fn execution_kind(plan: &ResolvedExperiment) -> Result<ExecutionKind, RunError> {
@@ -532,9 +543,23 @@ fn execution_kind(plan: &ResolvedExperiment) -> Result<ExecutionKind, RunError> 
                 .lifecycle
                 .maximum_runtime_seconds,
         })),
+        (
+            ProviderSpec::Local,
+            RuntimeSpec::LlamaCpp { output_tokens, .. },
+        ) => Ok(ExecutionKind::LlamaCpp(LlamaCppConfig {
+            requests: plan.experiment.spec.workload.requests,
+            warmup_runs: plan.experiment.spec.measurement.warmup_runs,
+            repetitions: plan.experiment.spec.measurement.repetitions,
+            output_tokens: *output_tokens,
+            maximum_runtime_seconds: plan
+                .experiment
+                .spec
+                .lifecycle
+                .maximum_runtime_seconds,
+        })),
         _ => Err(RunError::UnsupportedCombination {
             code: ERROR_EXECUTION_UNSUPPORTED_COMBINATION,
-            message: "executable combinations are provider localFake with runtime localFake and provider local with runtime cpuProbe".to_owned(),
+            message: "executable combinations are provider localFake with runtime localFake, provider local with runtime cpuProbe, and provider local with runtime llamaCpp".to_owned(),
         }),
     }
 }
@@ -548,6 +573,17 @@ fn packaged_cpu_probe_executable() -> PathBuf {
                 .map(|directory| directory.join("benchplane-cpu-probe"))
         })
         .unwrap_or_else(|| PathBuf::from("/benchplane-package-missing/bin/benchplane-cpu-probe"))
+}
+
+fn packaged_llama_cpp_executable() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| {
+            executable
+                .parent()
+                .map(|directory| directory.join("benchplane-llama-cpp"))
+        })
+        .unwrap_or_else(|| PathBuf::from("/benchplane-package-missing/bin/benchplane-llama-cpp"))
 }
 
 fn persist_run_transition(
@@ -859,6 +895,10 @@ mod tests {
         b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: cpu-probe }\nspec:\n  provider: { kind: local }\n  runtime: { kind: cpuProbe, outputTokens: 4, workUnitsPerToken: 32 }\n  workload: { profile: cpu-token-probe-v1, requests: 2, concurrency: 1 }\n  measurement: { warmupRuns: 1, repetitions: 2 }\n  budget: { maximumCostUsd: 0 }\n  lifecycle: { maximumRuntimeSeconds: 1 }\n".to_vec()
     }
 
+    fn llama_experiment() -> Vec<u8> {
+        b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: llama-cpp }\nspec:\n  provider: { kind: local }\n  runtime: { kind: llamaCpp, model: smollm2-135m-instruct-q2-k-v1, outputTokens: 4 }\n  workload: { profile: smollm2-chat-greedy-v1, requests: 2, concurrency: 1 }\n  measurement: { warmupRuns: 1, repetitions: 2 }\n  budget: { maximumCostUsd: 0 }\n  lifecycle: { maximumRuntimeSeconds: 1 }\n".to_vec()
+    }
+
     fn execute_fixed(
         root: &Path,
         seed: u64,
@@ -875,6 +915,7 @@ mod tests {
                 ids: &FixedIds,
                 hook,
                 cpu_probe_executable: None,
+                llama_cpp_executable: None,
             },
         )
     }
@@ -1045,6 +1086,7 @@ mod tests {
                 ids: &FixedIds,
                 hook: &NoopRunHook,
                 cpu_probe_executable: Some(&unspawnable),
+                llama_cpp_executable: None,
             },
         )
         .expect("runtime failure should finalize");
@@ -1053,6 +1095,37 @@ mod tests {
         assert_eq!(
             result.failure.as_ref().map(|failure| failure.code.as_str()),
             Some(benchplane_schema::ERROR_CPU_PROBE_SPAWN_FAILED)
+        );
+        assert_eq!(
+            read_attempt(Path::new(&result.bundle_path)).status,
+            AttemptStatus::Failed
+        );
+        verify_evidence_bundle(Path::new(&result.bundle_path)).expect("failed bundle verifies");
+    }
+
+    #[test]
+    fn llama_cpp_spawn_failure_publishes_failed_evidence() {
+        let directory = TestDirectory::new("llama-cpp-spawn-failure");
+        let unspawnable = PathBuf::from("benchplane\0llama-cpp");
+        let result = run_experiment_with_services(
+            &llama_experiment(),
+            &RunOptions {
+                output_root: directory.0.clone(),
+            },
+            &RunServices {
+                clock: &FixedClock,
+                ids: &FixedIds,
+                hook: &NoopRunHook,
+                cpu_probe_executable: None,
+                llama_cpp_executable: Some(&unspawnable),
+            },
+        )
+        .expect("runtime failure should finalize");
+        assert_eq!(result.run_state, RunState::Failed);
+        assert_eq!(result.validity_status, ValidityStatus::Indeterminate);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some(benchplane_schema::ERROR_LLAMA_CPP_SPAWN_FAILED)
         );
         assert_eq!(
             read_attempt(Path::new(&result.bundle_path)).status,
@@ -1195,6 +1268,7 @@ mod tests {
                 ids: &PanickingIds,
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
+                llama_cpp_executable: None,
             },
         )
         .expect_err("unsupported combination should be rejected");
@@ -1222,6 +1296,7 @@ mod tests {
                 ids: &PanickingIds,
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
+                llama_cpp_executable: None,
             },
         )
         .expect_err("excessive work should be rejected");
@@ -1250,6 +1325,7 @@ mod tests {
                 ids: &PanickingIds,
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
+                llama_cpp_executable: None,
             },
         )
         .expect_err("excessive work should be rejected");
@@ -1278,6 +1354,7 @@ mod tests {
                 ids: &PanickingIds,
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
+                llama_cpp_executable: None,
             },
         )
         .expect_err("excessive records should be rejected");

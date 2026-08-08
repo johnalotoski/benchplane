@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod child_supervisor;
 mod cpu_probe;
 pub mod evidence;
 mod execution;
 mod lifecycle;
+mod llama_cpp;
 mod local_fake;
 mod parsing;
 mod resolution;

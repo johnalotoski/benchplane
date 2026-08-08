@@ -5,3 +5,5 @@ Experiment specifications are reusable machine-readable inputs. They should not 
 Study-specific copies or overlays belong beneath the corresponding `studies/<id>/experiments/` directory.
 
 Files under `examples/` may be illustrative rather than executable. Each such file must say so explicitly and identify any placeholder model, revision, workload profile, or infrastructure value.
+
+Files under `smoke/` are checked executable paths. `local-llama-cpp.yaml` is intentionally fixed to the package-owned SmolLM2 identity and `smollm2-chat-greedy-v1` profile; it cannot be repointed to a local path, URL, arbitrary model, or arbitrary prompt.
