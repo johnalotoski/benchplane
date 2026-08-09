@@ -9,6 +9,7 @@ use std::{
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const SENSITIVE_ENV_SENTINEL: &str = "must-not-enter-benchplane-evidence";
 
 struct TestDirectory {
     path: PathBuf,
@@ -42,6 +43,7 @@ fn fixture(relative: &str) -> PathBuf {
 
 fn benchplane(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_benchplane"))
+        .env("BENCHPLANE_TEST_SECRET", SENSITIVE_ENV_SENTINEL)
         .args(arguments)
         .output()
         .expect("benchplane should execute")
@@ -143,6 +145,29 @@ fn cpu_probe_runs_through_public_cli_and_publishes_observed_measurements() {
         assert_eq!(record["successfulRequests"], 2);
         assert_eq!(record["failedRequests"], 0);
     }
+    let provenance: Value = serde_json::from_slice(
+        &fs::read(bundle.join("attempts/0001/provenance.json")).expect("attempt provenance"),
+    )
+    .expect("attempt provenance JSON");
+    assert_eq!(provenance["format"], "benchplane-attempt-provenance/v1");
+    assert_eq!(provenance["runId"], result["runId"]);
+    assert_eq!(provenance["attemptNumber"], 1);
+    assert_eq!(provenance["software"]["runtime"]["kind"], "cpuProbe");
+    assert_eq!(
+        provenance["software"]["runtime"]["generator"],
+        "benchplane-cpu-probe/v1"
+    );
+    let platform = provenance["platform"].as_object().expect("platform object");
+    assert!(!platform.contains_key("hostname"));
+    assert!(!platform.contains_key("machineId"));
+    assert!(!platform.contains_key("username"));
+    let provenance_text = serde_json::to_string(&provenance).expect("serialize provenance value");
+    assert!(!provenance_text.contains("BENCHPLANE_TEST_SECRET"));
+    assert!(!provenance_text.contains(SENSITIVE_ENV_SENTINEL));
+    assert!(fs::read_to_string(bundle.join("SHA256SUMS"))
+        .expect("checksum inventory")
+        .lines()
+        .any(|line| line.ends_with("  attempts/0001/provenance.json")));
     let verified = benchplane(&[
         "evidence",
         "verify",

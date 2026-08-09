@@ -8,6 +8,7 @@ mod lifecycle;
 mod llama_cpp;
 mod local_fake;
 mod parsing;
+mod provenance;
 mod resolution;
 mod run;
 

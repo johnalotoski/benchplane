@@ -8,16 +8,15 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 
 ## Current milestone
 
-Keep the packaged local CPU model-inference milestone small and reviewable. The concrete `local`/`llamaCpp` path:
+Keep the attempt-scoped execution-provenance milestone small and reviewable. Every supported local execution path:
 
-1. loads the package-fixed SmolLM2-135M-Instruct Q2_K model with pinned CPU-only llama.cpp;
-2. performs bounded greedy transformer inference in a package-owned child and emits no model text;
-3. records one aggregate warmup or measured evidence-v1 record with observed latency, TTFT, throughput, and request counts;
-4. accepts only the fixed `smollm2-chat-greedy-v1` workload at concurrency one and bounds records, tokens, child output, and runtime independently in parent and helper;
-5. discards every parsed record unless the complete child protocol and exit status succeed; and
-6. runs offline through the existing CLI and unprivileged NixOS oneshot on x86-64 and aarch64 Linux.
+1. captures a bounded typed provenance record while attempt 1 is `preparing`, before concrete execution begins;
+2. records only allowlisted OS, kernel, architecture, CPU model/class and logical-CPU availability fields, never generic host inventory or environment;
+3. identifies the Benchplane package and concrete generator, including the pinned llama.cpp `b10133`, fixed SmolLM2 model digest, CPU-only backend lineage, and meaningful Nix-store identities for packaged inference;
+4. stores the checksum-covered payload at `attempts/0001/provenance.json` and verifies its structure and attempt/run identity when present; and
+5. preserves `benchplane-evidence/v1` compatibility by accepting historical bundles that predate the additive provenance payload.
 
-This milestone demonstrates real local model execution and measurement plumbing, not representative production performance, cross-host comparability, GPU or vLLM behavior, model quality, arbitrary model/prompt selection, runtime download, a generic subprocess framework, AWS execution, or a controller-to-runner protocol. Persistent runner state and evidence belong beneath the systemd-managed state directory; `PrivateTmp=true` intentionally provides private writable temporary directories.
+This milestone improves attribution and reproducibility context; it does not authenticate a host or publisher, establish statistically reproducible or cross-host-comparable performance, measure CPU time or memory, add GPU/vLLM/AWS behavior, add signing or attestation, or introduce generic inventory, telemetry, process, provider, plugin, or controller abstractions. Preserve the fixed packaged inference, bounded child supervision, lifecycle, validity, and publication contracts.
 
 ## Boundaries
 

@@ -6,6 +6,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <limits>
 #include <string>
@@ -241,6 +242,13 @@ int main(int argc, char ** argv) {
         return kUsageExit;
     }
 
+    // b10133's explicit-directory loader also honors GGML_BACKEND_PATH after
+    // loading the known backends. Direct helper invocation must not permit that
+    // ambient variable to escape the compiled package-owned backend directory.
+    if (::unsetenv("GGML_BACKEND_PATH") != 0) {
+        std::fputs("could not neutralize backend redirection\n", stderr);
+        return kModelInitExit;
+    }
     ggml_backend_load_all_from_path(BENCHPLANE_BACKEND_PATH);
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = 0;

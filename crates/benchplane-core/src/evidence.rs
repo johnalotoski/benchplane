@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use benchplane_schema::{
-    AttemptRecord, AttemptStatus, EvidenceManifest, LifecycleEvent, RunRecord, RunState,
-    RunSummary, ValidityResult, EVIDENCE_FORMAT_V1,
+    AttemptProvenance, AttemptRecord, AttemptStatus, DeviceClass, EvidenceManifest, LifecycleEvent,
+    RunRecord, RunState, RunSummary, RuntimeProvenance, ValidityResult,
+    ATTEMPT_PROVENANCE_FORMAT_V1, BENCHPLANE_SOFTWARE_NAME, CPU_PROBE_GENERATOR_VERSION,
+    EVIDENCE_FORMAT_V1, LLAMA_CPP_BACKEND_IDENTITY, LLAMA_CPP_ENGINE_NAME,
+    LLAMA_CPP_ENGINE_VERSION, LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_MODEL_IDENTITY,
+    LLAMA_CPP_MODEL_SHA256, LOCAL_FAKE_GENERATOR_VERSION,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,6 +22,9 @@ const MAX_CHECKSUM_LINE_BYTES: usize = 4 * 1024;
 const MAX_CHECKSUM_ENTRIES: usize = 10_000;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_IDENTITY_RECORD_BYTES: u64 = 1024 * 1024;
+const MAX_ATTEMPT_PROVENANCE_BYTES: u64 = 16 * 1024;
+const MAX_PROVENANCE_VALUE_BYTES: usize = 256;
+const MAX_NIX_STORE_PATH_BYTES: usize = 512;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
@@ -95,6 +102,8 @@ pub enum EvidenceError {
     BundleRunIdMismatch,
     #[error("evidence record {0} has inconsistent run identity or status")]
     InconsistentRecord(String),
+    #[error("invalid attempt provenance: {0}")]
+    InvalidAttemptProvenance(String),
 }
 
 pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceError> {
@@ -448,6 +457,7 @@ fn retained_limit(relative: &str) -> Option<u64> {
         | "validity.json"
         | "summary.json"
         | "events.jsonl" => Some(MAX_IDENTITY_RECORD_BYTES),
+        "attempts/0001/provenance.json" => Some(MAX_ATTEMPT_PROVENANCE_BYTES),
         _ => None,
     }
 }
@@ -544,6 +554,14 @@ fn validate_record_consistency(
             "attempts/0001/attempt.json".to_owned(),
         ));
     }
+    if let Some(bytes) = records.get("attempts/0001/provenance.json") {
+        let provenance: AttemptProvenance =
+            serde_json::from_slice(bytes).map_err(|source| EvidenceError::InvalidRecord {
+                path: "attempts/0001/provenance.json".to_owned(),
+                source,
+            })?;
+        validate_attempt_provenance(&provenance, manifest)?;
+    }
     let validity: ValidityResult = parse_record(records, "validity.json")?;
     if validity.run_id != manifest.run_id || validity.status != manifest.validity_status {
         return Err(EvidenceError::InconsistentRecord(
@@ -578,6 +596,161 @@ fn validate_record_consistency(
         }
     }
     Ok(())
+}
+
+fn validate_attempt_provenance(
+    provenance: &AttemptProvenance,
+    manifest: &EvidenceManifest,
+) -> Result<(), EvidenceError> {
+    if provenance.format != ATTEMPT_PROVENANCE_FORMAT_V1 {
+        return invalid_provenance("unsupported format");
+    }
+    if provenance.run_id != manifest.run_id || provenance.attempt_number != 1 {
+        return invalid_provenance("runId or attemptNumber does not match the bundle");
+    }
+
+    require_provenance_value(
+        &provenance.platform.operating_system.family,
+        "operatingSystem.family",
+    )?;
+    optional_provenance_value(
+        provenance.platform.operating_system.distribution.as_deref(),
+        "operatingSystem.distribution",
+    )?;
+    optional_provenance_value(
+        provenance.platform.operating_system.version.as_deref(),
+        "operatingSystem.version",
+    )?;
+    require_provenance_value(&provenance.platform.kernel.name, "kernel.name")?;
+    optional_provenance_value(
+        provenance.platform.kernel.release.as_deref(),
+        "kernel.release",
+    )?;
+    require_provenance_value(&provenance.platform.architecture, "architecture")?;
+    optional_provenance_value(provenance.platform.cpu.model.as_deref(), "cpu.model")?;
+    if provenance.platform.cpu.logical_cpu_count == Some(0) {
+        return invalid_provenance("cpu.logicalCpuCount must be positive when present");
+    }
+
+    let benchplane = &provenance.software.benchplane;
+    if benchplane.name != BENCHPLANE_SOFTWARE_NAME {
+        return invalid_provenance("software.benchplane.name is not supported");
+    }
+    require_provenance_value(&benchplane.version, "software.benchplane.version")?;
+    optional_nix_store_path(
+        benchplane.nix_store_path.as_deref(),
+        "software.benchplane.nixStorePath",
+    )?;
+
+    match &provenance.software.runtime {
+        RuntimeProvenance::LocalFake { generator } => {
+            if generator != LOCAL_FAKE_GENERATOR_VERSION {
+                return invalid_provenance("localFake generator identity is not supported");
+            }
+        }
+        RuntimeProvenance::CpuProbe { generator } => {
+            if generator != CPU_PROBE_GENERATOR_VERSION {
+                return invalid_provenance("cpuProbe generator identity is not supported");
+            }
+        }
+        RuntimeProvenance::LlamaCpp {
+            generator,
+            engine,
+            model,
+            backend,
+        } => {
+            if generator != LLAMA_CPP_GENERATOR_VERSION
+                || engine.name != LLAMA_CPP_ENGINE_NAME
+                || engine.version != LLAMA_CPP_ENGINE_VERSION
+                || model.identity != LLAMA_CPP_MODEL_IDENTITY
+                || model.sha256 != LLAMA_CPP_MODEL_SHA256
+                || backend.identity != LLAMA_CPP_BACKEND_IDENTITY
+                || backend.device_class != DeviceClass::Cpu
+            {
+                return invalid_provenance("llamaCpp software lineage is not supported");
+            }
+            optional_nix_store_path(
+                engine.nix_store_path.as_deref(),
+                "runtime.engine.nixStorePath",
+            )?;
+            optional_nix_store_path(
+                model.nix_store_path.as_deref(),
+                "runtime.model.nixStorePath",
+            )?;
+            optional_nix_store_path(
+                backend.nix_store_path.as_deref(),
+                "runtime.backend.nixStorePath",
+            )?;
+            let store_paths_present = [
+                engine.nix_store_path.is_some(),
+                model.nix_store_path.is_some(),
+                backend.nix_store_path.is_some(),
+            ];
+            if store_paths_present.iter().any(|present| *present)
+                && !store_paths_present.iter().all(|present| *present)
+            {
+                return invalid_provenance(
+                    "llamaCpp Nix store lineage must be wholly present or absent",
+                );
+            }
+            if engine.nix_store_path != backend.nix_store_path {
+                return invalid_provenance(
+                    "llamaCpp engine and backend must identify the same Nix store object",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_provenance_value(value: &str, field: &'static str) -> Result<(), EvidenceError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > MAX_PROVENANCE_VALUE_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return invalid_provenance(&format!(
+            "{field} is empty, oversized, or contains controls"
+        ));
+    }
+    Ok(())
+}
+
+fn optional_provenance_value(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<(), EvidenceError> {
+    if let Some(value) = value {
+        require_provenance_value(value, field)?;
+    }
+    Ok(())
+}
+
+fn optional_nix_store_path(value: Option<&str>, field: &'static str) -> Result<(), EvidenceError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Some(entry) = value.strip_prefix("/nix/store/") else {
+        return invalid_provenance(&format!("{field} is not a Nix store object path"));
+    };
+    let (hash, name) = entry.split_once('-').unwrap_or_default();
+    const NIX_BASE32: &str = "0123456789abcdfghijklmnpqrsvwxyz";
+    if value.len() > MAX_NIX_STORE_PATH_BYTES
+        || entry.contains('/')
+        || hash.len() != 32
+        || !hash.chars().all(|character| NIX_BASE32.contains(character))
+        || name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "+-._?=".contains(character))
+    {
+        return invalid_provenance(&format!("{field} is not a bounded Nix store object path"));
+    }
+    Ok(())
+}
+
+fn invalid_provenance<T>(message: &str) -> Result<T, EvidenceError> {
+    Err(EvidenceError::InvalidAttemptProvenance(message.to_owned()))
 }
 
 fn is_run_id(value: &str) -> bool {
@@ -688,10 +861,129 @@ mod tests {
         }
     }
 
+    fn valid_provenance() -> AttemptProvenance {
+        serde_json::from_value(serde_json::json!({
+            "format": ATTEMPT_PROVENANCE_FORMAT_V1,
+            "runId": "run-018f6f9a-7b3c-7abc-8def-0123456789ab",
+            "attemptNumber": 1,
+            "platform": {
+                "operatingSystem": {
+                    "family": "linux",
+                    "distribution": "nixos",
+                    "version": "26.05"
+                },
+                "kernel": { "name": "Linux", "release": "6.12.1" },
+                "architecture": "x86_64",
+                "cpu": { "model": "Example CPU", "logicalCpuCount": 2 }
+            },
+            "software": {
+                "benchplane": {
+                    "name": BENCHPLANE_SOFTWARE_NAME,
+                    "version": "0.1.0",
+                    "nixStorePath": null
+                },
+                "runtime": {
+                    "kind": "llamaCpp",
+                    "generator": LLAMA_CPP_GENERATOR_VERSION,
+                    "engine": {
+                        "name": LLAMA_CPP_ENGINE_NAME,
+                        "version": LLAMA_CPP_ENGINE_VERSION,
+                        "nixStorePath": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-llama-cpp-b10133"
+                    },
+                    "model": {
+                        "identity": LLAMA_CPP_MODEL_IDENTITY,
+                        "sha256": LLAMA_CPP_MODEL_SHA256,
+                        "nixStorePath": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-smollm2.gguf"
+                    },
+                    "backend": {
+                        "identity": LLAMA_CPP_BACKEND_IDENTITY,
+                        "deviceClass": "cpu",
+                        "nixStorePath": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-llama-cpp-b10133"
+                    }
+                }
+            }
+        }))
+        .expect("construct valid attempt provenance")
+    }
+
+    fn write_provenance(root: &Path, provenance: &AttemptProvenance) {
+        fs::write(
+            root.join("attempts/0001/provenance.json"),
+            serde_json::to_vec_pretty(provenance).expect("serialize provenance"),
+        )
+        .expect("write provenance");
+    }
+
     #[test]
     fn verifies_the_checked_in_fixture() {
         let manifest = verify_evidence_bundle(&fixture_root()).expect("fixture should verify");
         assert_eq!(manifest.format, EVIDENCE_FORMAT_V1);
+    }
+
+    #[test]
+    fn verifies_optional_attempt_provenance_and_checksums_it() {
+        let directory = copy_fixture("attempt-provenance");
+        write_provenance(&directory.path, &valid_provenance());
+        rewrite_checksums(&directory.path);
+
+        verify_evidence_bundle(&directory.path).expect("provenance extension should verify");
+        assert!(fs::read_to_string(directory.path.join("SHA256SUMS"))
+            .expect("read checksums")
+            .lines()
+            .any(|line| line.ends_with("  attempts/0001/provenance.json")));
+    }
+
+    #[test]
+    fn rejects_tampered_and_semantically_invalid_attempt_provenance() {
+        let tampered = copy_fixture("tampered-attempt-provenance");
+        write_provenance(&tampered.path, &valid_provenance());
+        rewrite_checksums(&tampered.path);
+        fs::write(tampered.path.join("attempts/0001/provenance.json"), b"{}\n")
+            .expect("tamper with provenance");
+        assert!(matches!(
+            verify_evidence_bundle(&tampered.path),
+            Err(EvidenceError::ChecksumMismatch(path))
+                if path == "attempts/0001/provenance.json"
+        ));
+
+        let inconsistent = copy_fixture("inconsistent-attempt-provenance");
+        let mut provenance = valid_provenance();
+        provenance.run_id = "run-018f6f9a-7b3c-7abc-8def-0123456789ac".to_owned();
+        write_provenance(&inconsistent.path, &provenance);
+        rewrite_checksums(&inconsistent.path);
+        assert!(matches!(
+            verify_evidence_bundle(&inconsistent.path),
+            Err(EvidenceError::InvalidAttemptProvenance(_))
+        ));
+
+        let malformed = copy_fixture("malformed-attempt-provenance");
+        fs::write(
+            malformed.path.join("attempts/0001/provenance.json"),
+            b"{}\n",
+        )
+        .expect("write malformed provenance");
+        rewrite_checksums(&malformed.path);
+        assert!(matches!(
+            verify_evidence_bundle(&malformed.path),
+            Err(EvidenceError::InvalidRecord { path, .. })
+                if path == "attempts/0001/provenance.json"
+        ));
+    }
+
+    #[test]
+    fn bounds_attempt_provenance_parsing() {
+        let directory = copy_fixture("oversized-attempt-provenance");
+        fs::write(
+            directory.path.join("attempts/0001/provenance.json"),
+            vec![b' '; MAX_ATTEMPT_PROVENANCE_BYTES as usize + 1],
+        )
+        .expect("write oversized provenance");
+        rewrite_checksums(&directory.path);
+        assert!(matches!(
+            verify_evidence_bundle(&directory.path),
+            Err(EvidenceError::InconsistentRecord(path))
+                if path.contains("attempts/0001/provenance.json exceeds")
+        ));
     }
 
     #[test]
