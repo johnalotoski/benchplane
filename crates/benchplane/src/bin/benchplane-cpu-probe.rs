@@ -128,6 +128,7 @@ fn emit_repetition(
         throughput_milli_requests_per_second: throughput.max(1),
         successful_requests: args.requests,
         failed_requests: 0,
+        request_observations: Vec::new(),
     };
     serde_json::to_writer(&mut *output, &record)
         .map_err(|error| format!("could not serialize measurement: {error}"))?;

@@ -204,7 +204,7 @@
               }
               runtime = software["runtime"]
               assert runtime["kind"] == "llamaCpp"
-              assert runtime["generator"] == "benchplane-llama-cpp-smollm2/v1"
+              assert runtime["generator"] == "benchplane-llama-cpp-smollm2/v2"
               assert runtime["engine"]["name"] == "llama.cpp"
               assert runtime["engine"]["version"] == "b10133"
               assert runtime["model"]["identity"] == "smollm2-135m-instruct-q2-k-v1"
@@ -244,14 +244,25 @@
               phases = [record["phase"] for record in records]
               assert phases.count("warmup") == 1
               assert phases.count("measured") == 1
+              observations = []
               for record in records:
-                  assert record["generator"] == "benchplane-llama-cpp-smollm2/v1"
+                  assert record["generator"] == "benchplane-llama-cpp-smollm2/v2"
                   assert record["latencyMicros"] > 0
                   assert record["timeToFirstTokenMicros"] > 0
                   assert record["timeToFirstTokenMicros"] <= record["latencyMicros"]
                   assert record["throughputMilliRequestsPerSecond"] > 0
                   assert record["successfulRequests"] == 1
                   assert record["failedRequests"] == 0
+                  assert len(record["requestObservations"]) == 1
+                  observation = record["requestObservations"][0]
+                  assert observation["requestIndex"] == 1
+                  assert observation["latencyMicros"] > 0
+                  assert observation["timeToFirstTokenMicros"] > 0
+                  assert observation["timeToFirstTokenMicros"] <= observation["latencyMicros"]
+                  observations.append((record["phase"], observation))
+              assert len(observations) == 2
+              assert sum(phase == "warmup" for phase, _ in observations) == 1
+              assert sum(phase == "measured" for phase, _ in observations) == 1
 
               machine.fail(
                   "find /var/lib/benchplane/staging -mindepth 1 -maxdepth 1 -type d | grep ."

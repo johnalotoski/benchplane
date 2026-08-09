@@ -38,6 +38,11 @@ struct Args {
     uint32_t output_tokens = 0;
 };
 
+struct RequestObservation {
+    uint64_t latency_micros = 0;
+    uint64_t ttft_micros = 0;
+};
+
 bool parse_u32(std::string_view input, uint32_t & output) {
     if (input.empty()) {
         return false;
@@ -121,9 +126,14 @@ constexpr uint64_t ceil_mean_micros(uint64_t total_nanos, uint32_t count) {
     return std::max<uint64_t>(1, rounded);
 }
 
+constexpr uint64_t ceil_micros(uint64_t nanos) {
+    return std::max<uint64_t>(1, nanos / 1000 + (nanos % 1000 != 0 ? 1 : 0));
+}
+
 static_assert(ceil_mean_micros(2000, 2) == 1);
 static_assert(ceil_mean_micros(2001, 2) == 2);
 static_assert(ceil_mean_micros(1, std::numeric_limits<uint32_t>::max()) == 1);
+static_assert(ceil_micros(1) == 1 && ceil_micros(1001) == 2);
 
 bool run_request(
     llama_model * model,
@@ -197,6 +207,8 @@ bool emit_repetition(
     const auto repetition_started = std::chrono::steady_clock::now();
     std::chrono::nanoseconds total_latency{0};
     std::chrono::nanoseconds total_ttft{0};
+    std::vector<RequestObservation> observations;
+    observations.reserve(args.requests);
     for (uint32_t request = 0; request < args.requests; ++request) {
         std::chrono::nanoseconds latency{0};
         std::chrono::nanoseconds ttft{0};
@@ -205,6 +217,11 @@ bool emit_repetition(
         }
         total_latency += latency;
         total_ttft += ttft;
+        const uint64_t latency_micros = ceil_micros(static_cast<uint64_t>(latency.count()));
+        observations.push_back(RequestObservation{
+            latency_micros,
+            std::min(latency_micros, ceil_micros(static_cast<uint64_t>(ttft.count()))),
+        });
     }
     const auto repetition_elapsed = std::chrono::steady_clock::now() - repetition_started;
     const uint64_t latency_micros = ceil_mean_micros(
@@ -218,19 +235,35 @@ bool emit_repetition(
         1, static_cast<uint64_t>(args.requests) * 1000ULL * 1000000000ULL / elapsed_nanos);
 
     const int written = std::printf(
-        "{\"generator\":\"benchplane-llama-cpp-smollm2/v1\","
+        "{\"generator\":\"benchplane-llama-cpp-smollm2/v2\","
         "\"attemptNumber\":1,\"phase\":\"%s\",\"repetitionIndex\":%u,"
         "\"sampleIndex\":1,\"latencyMicros\":%llu,"
         "\"timeToFirstTokenMicros\":%llu,"
         "\"throughputMilliRequestsPerSecond\":%llu,"
-        "\"successfulRequests\":%u,\"failedRequests\":0}\n",
+        "\"successfulRequests\":%u,\"failedRequests\":0,"
+        "\"requestObservations\":[",
         phase,
         repetition_index,
         static_cast<unsigned long long>(latency_micros),
         static_cast<unsigned long long>(ttft_micros),
         static_cast<unsigned long long>(throughput),
         args.requests);
-    return written > 0 && std::fflush(stdout) == 0;
+    if (written <= 0) {
+        return false;
+    }
+    for (uint32_t request = 0; request < observations.size(); ++request) {
+        const RequestObservation & observation = observations[request];
+        if (std::printf(
+                "%s{\"requestIndex\":%u,\"latencyMicros\":%llu,"
+                "\"timeToFirstTokenMicros\":%llu}",
+                request == 0 ? "" : ",",
+                request + 1,
+                static_cast<unsigned long long>(observation.latency_micros),
+                static_cast<unsigned long long>(observation.ttft_micros)) <= 0) {
+            return false;
+        }
+    }
+    return std::printf("]}\n") > 0 && std::fflush(stdout) == 0;
 }
 
 } // namespace

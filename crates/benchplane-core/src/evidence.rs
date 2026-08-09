@@ -2,12 +2,13 @@
 
 use benchplane_schema::{
     AttemptProvenance, AttemptRecord, AttemptResources, AttemptStatus, DeviceClass,
-    EvidenceManifest, LifecycleEvent, RunRecord, RunState, RunSummary, RuntimeProvenance,
-    ValidityResult, ATTEMPT_PROVENANCE_FORMAT_V1, ATTEMPT_RESOURCES_FORMAT_V1,
-    BENCHPLANE_SOFTWARE_NAME, CPU_PROBE_GENERATOR_VERSION, EVIDENCE_FORMAT_V1,
-    LLAMA_CPP_BACKEND_IDENTITY, LLAMA_CPP_ENGINE_NAME, LLAMA_CPP_ENGINE_VERSION,
-    LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_MODEL_IDENTITY, LLAMA_CPP_MODEL_SHA256,
-    LOCAL_FAKE_GENERATOR_VERSION,
+    EvidenceManifest, LifecycleEvent, LocalFakeScenario, MeasurementPhase, MeasurementRecord,
+    ProviderSpec, ResolvedExperiment, ResourceScope, RunRecord, RunState, RunSummary,
+    RuntimeProvenance, RuntimeSpec, ValidityResult, ValidityStatus, ATTEMPT_PROVENANCE_FORMAT_V1,
+    ATTEMPT_RESOURCES_FORMAT_V1, BENCHPLANE_SOFTWARE_NAME, CPU_PROBE_GENERATOR_VERSION,
+    EVIDENCE_FORMAT_V1, LLAMA_CPP_BACKEND_IDENTITY, LLAMA_CPP_ENGINE_NAME,
+    LLAMA_CPP_ENGINE_VERSION, LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_GENERATOR_VERSION_V1,
+    LLAMA_CPP_MODEL_IDENTITY, LLAMA_CPP_MODEL_SHA256, LOCAL_FAKE_GENERATOR_VERSION,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -25,6 +26,9 @@ const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_IDENTITY_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_ATTEMPT_PROVENANCE_BYTES: u64 = 16 * 1024;
 const MAX_ATTEMPT_RESOURCES_BYTES: u64 = 4 * 1024;
+const MAX_RESOLVED_PLAN_BYTES: u64 = 64 * 1024;
+const MAX_MEASUREMENTS_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MEASUREMENT_LINE_BYTES: usize = 64 * 1024;
 const MAX_PROVENANCE_VALUE_BYTES: usize = 256;
 const MAX_NIX_STORE_PATH_BYTES: usize = 512;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -108,6 +112,10 @@ pub enum EvidenceError {
     InvalidAttemptProvenance(String),
     #[error("invalid attempt resources: {0}")]
     InvalidAttemptResources(String),
+    #[error("invalid resolved plan: {0}")]
+    InvalidResolvedPlan(String),
+    #[error("invalid measurements: {0}")]
+    InvalidMeasurements(String),
 }
 
 pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceError> {
@@ -131,6 +139,7 @@ pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceE
 
     let mut checked_names = BTreeSet::new();
     let mut checked_targets = BTreeSet::new();
+    let mut verified_digests = BTreeMap::new();
     let mut retained_records = BTreeMap::new();
     let mut line = String::new();
     let mut total_checksum_bytes = 0_u64;
@@ -194,6 +203,7 @@ pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceE
         if actual != expected {
             return Err(EvidenceError::ChecksumMismatch(relative.to_owned()));
         }
+        verified_digests.insert(relative.to_owned(), actual);
         if let Some(bytes) = bytes {
             retained_records.insert(relative.to_owned(), bytes);
         }
@@ -212,7 +222,7 @@ pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceE
         serde_json::from_slice(manifest_bytes).map_err(EvidenceError::Manifest)?;
     validate_manifest(&manifest)?;
     validate_required_payloads(&checked_names)?;
-    validate_record_consistency(&root, &manifest, &retained_records)?;
+    validate_record_consistency(&root, &manifest, &retained_records, &verified_digests)?;
 
     Ok(manifest)
 }
@@ -463,6 +473,7 @@ fn retained_limit(relative: &str) -> Option<u64> {
         | "events.jsonl" => Some(MAX_IDENTITY_RECORD_BYTES),
         "attempts/0001/provenance.json" => Some(MAX_ATTEMPT_PROVENANCE_BYTES),
         "attempts/0001/resources.json" => Some(MAX_ATTEMPT_RESOURCES_BYTES),
+        "resolved-plan.json" => Some(MAX_RESOLVED_PLAN_BYTES),
         _ => None,
     }
 }
@@ -530,10 +541,21 @@ fn validate_record_consistency(
     root: &Path,
     manifest: &EvidenceManifest,
     records: &BTreeMap<String, Vec<u8>>,
+    verified_digests: &BTreeMap<String, String>,
 ) -> Result<(), EvidenceError> {
     if root.file_name().and_then(|name| name.to_str()) != Some(manifest.run_id.as_str()) {
         return Err(EvidenceError::BundleRunIdMismatch);
     }
+
+    let plan: ResolvedExperiment = parse_record(records, "resolved-plan.json")?;
+    validate_resolved_plan(&plan, manifest)?;
+    let measurement_digest = verified_digests
+        .get("attempts/0001/measurements.jsonl")
+        .ok_or_else(|| {
+            EvidenceError::MissingRequiredPayload("attempts/0001/measurements.jsonl".to_owned())
+        })?;
+    let measurement_validation =
+        validate_measurements(root, measurement_digest, &plan, manifest.run_status)?;
 
     let run: RunRecord = parse_record(records, "run.json")?;
     if run.run_id != manifest.run_id
@@ -565,7 +587,12 @@ fn validate_record_consistency(
                 path: "attempts/0001/provenance.json".to_owned(),
                 source,
             })?;
-        validate_attempt_provenance(&provenance, manifest)?;
+        validate_attempt_provenance(
+            &provenance,
+            manifest,
+            &plan,
+            measurement_validation.generator.as_deref(),
+        )?;
     }
     if let Some(bytes) = records.get("attempts/0001/resources.json") {
         let resources: AttemptResources =
@@ -573,10 +600,26 @@ fn validate_record_consistency(
                 path: "attempts/0001/resources.json".to_owned(),
                 source,
             })?;
-        validate_attempt_resources(&resources, manifest)?;
+        validate_attempt_resources(&resources, manifest, &plan)?;
     }
     let validity: ValidityResult = parse_record(records, "validity.json")?;
-    if validity.run_id != manifest.run_id || validity.status != manifest.validity_status {
+    let expected_validity = match manifest.run_status {
+        RunState::Succeeded
+            if measurement_validation.measured_records
+                >= plan.experiment.spec.measurement.repetitions =>
+        {
+            ValidityStatus::Valid
+        }
+        RunState::Succeeded => ValidityStatus::Invalid,
+        RunState::Failed | RunState::Interrupted => ValidityStatus::Indeterminate,
+        _ => unreachable!("manifest status was validated as terminal"),
+    };
+    if validity.run_id != manifest.run_id
+        || validity.status != manifest.validity_status
+        || validity.status != expected_validity
+        || validity.required_samples != plan.experiment.spec.measurement.repetitions
+        || validity.observed_samples != measurement_validation.measured_records
+    {
         return Err(EvidenceError::InconsistentRecord(
             "validity.json".to_owned(),
         ));
@@ -586,6 +629,7 @@ fn validate_record_consistency(
         || summary.run_status != manifest.run_status
         || summary.validity_status != manifest.validity_status
         || summary.attempt_count != 1
+        || summary.sample_count != measurement_validation.measured_records
         || summary.experiment_digest != manifest.experiment_digest
         || summary.resolved_plan_digest != manifest.resolved_plan_digest
     {
@@ -611,9 +655,248 @@ fn validate_record_consistency(
     Ok(())
 }
 
+struct MeasurementValidation {
+    measured_records: u32,
+    generator: Option<String>,
+}
+
+fn validate_resolved_plan(
+    plan: &ResolvedExperiment,
+    manifest: &EvidenceManifest,
+) -> Result<(), EvidenceError> {
+    let expected = crate::resolution::resolve_experiment(plan.experiment.clone())
+        .map_err(|error| EvidenceError::InvalidResolvedPlan(error.to_string()))?;
+    if &expected != plan
+        || plan.experiment_digest != manifest.experiment_digest
+        || plan.resolved_plan_digest != manifest.resolved_plan_digest
+    {
+        return Err(EvidenceError::InvalidResolvedPlan(
+            "typed content or deterministic digests do not match the bundle".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_measurements(
+    root: &Path,
+    expected_digest: &str,
+    plan: &ResolvedExperiment,
+    run_status: RunState,
+) -> Result<MeasurementValidation, EvidenceError> {
+    let relative = Path::new("attempts/0001/measurements.jsonl");
+    let display = "attempts/0001/measurements.jsonl";
+    let path = checked_regular_path(root, relative, display)?;
+    let size = fs::metadata(&path)
+        .map_err(|source| EvidenceError::Read {
+            path: path.display().to_string(),
+            source,
+        })?
+        .len();
+    if size > MAX_MEASUREMENTS_BYTES {
+        return invalid_measurements(&format!(
+            "{display} exceeds the {MAX_MEASUREMENTS_BYTES}-byte parsing limit"
+        ));
+    }
+
+    let (expected_warmups, expected_measured) = expected_measurement_counts(plan, run_status)?;
+    let expected_total = expected_warmups
+        .checked_add(expected_measured)
+        .ok_or_else(|| EvidenceError::InvalidMeasurements("record count overflowed".to_owned()))?;
+    let file = File::open(&path).map_err(|source| EvidenceError::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut line = Vec::new();
+    let mut total_bytes = 0_u64;
+    let mut position = 0_u32;
+    let mut generator: Option<String> = None;
+
+    loop {
+        line.clear();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|source| EvidenceError::Read {
+                path: path.display().to_string(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        total_bytes = total_bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| EvidenceError::InvalidMeasurements("file size overflowed".to_owned()))?;
+        if total_bytes > MAX_MEASUREMENTS_BYTES {
+            return invalid_measurements("measurement payload exceeds its parsing limit");
+        }
+        if read > MAX_MEASUREMENT_LINE_BYTES {
+            return invalid_measurements("measurement record exceeds its line bound");
+        }
+        hasher.update(&line);
+        if line.last() != Some(&b'\n') {
+            return invalid_measurements("measurement JSONL ends with a truncated record");
+        }
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        if line.is_empty() || position >= expected_total {
+            return invalid_measurements("measurement sequence has an empty or extra record");
+        }
+        let record: MeasurementRecord =
+            serde_json::from_slice(&line).map_err(|source| EvidenceError::InvalidRecord {
+                path: display.to_owned(),
+                source,
+            })?;
+        validate_measurement_record(
+            &record,
+            position,
+            expected_warmups,
+            plan,
+            generator.as_deref(),
+        )?;
+        if generator.is_none() {
+            generator = Some(record.generator.clone());
+        }
+        position += 1;
+    }
+
+    if hex::encode(hasher.finalize()) != expected_digest {
+        return Err(EvidenceError::ChecksumMismatch(display.to_owned()));
+    }
+    if position != expected_total {
+        return invalid_measurements(&format!(
+            "measurement sequence has {position} records; expected {expected_total}"
+        ));
+    }
+    Ok(MeasurementValidation {
+        measured_records: expected_measured,
+        generator,
+    })
+}
+
+fn expected_measurement_counts(
+    plan: &ResolvedExperiment,
+    run_status: RunState,
+) -> Result<(u32, u32), EvidenceError> {
+    let measurement = &plan.experiment.spec.measurement;
+    match (
+        &plan.experiment.spec.provider,
+        &plan.experiment.spec.runtime,
+    ) {
+        (ProviderSpec::LocalFake, RuntimeSpec::LocalFake { scenario, .. }) => {
+            let (expected_status, measured) = match scenario {
+                LocalFakeScenario::Success => (RunState::Succeeded, measurement.repetitions),
+                LocalFakeScenario::InsufficientMeasurements => (
+                    RunState::Succeeded,
+                    measurement.repetitions.saturating_sub(1),
+                ),
+                LocalFakeScenario::RuntimeFailure => (
+                    RunState::Failed,
+                    measurement.repetitions.saturating_sub(1).min(1),
+                ),
+                LocalFakeScenario::Interrupted => (
+                    RunState::Interrupted,
+                    measurement.repetitions.saturating_sub(1).min(1),
+                ),
+            };
+            if run_status != expected_status {
+                return invalid_measurements("localFake scenario does not match run status");
+            }
+            Ok((measurement.warmup_runs, measured))
+        }
+        (ProviderSpec::Local, RuntimeSpec::CpuProbe { .. } | RuntimeSpec::LlamaCpp { .. }) => {
+            match run_status {
+                RunState::Succeeded => Ok((measurement.warmup_runs, measurement.repetitions)),
+                RunState::Failed => Ok((0, 0)),
+                _ => invalid_measurements("helper-backed run has an unsupported terminal status"),
+            }
+        }
+        _ => invalid_measurements("resolved provider/runtime combination is not executable"),
+    }
+}
+
+fn validate_measurement_record(
+    record: &MeasurementRecord,
+    position: u32,
+    warmup_count: u32,
+    plan: &ResolvedExperiment,
+    prior_generator: Option<&str>,
+) -> Result<(), EvidenceError> {
+    let (phase, repetition_index) = if position < warmup_count {
+        (MeasurementPhase::Warmup, position + 1)
+    } else {
+        (MeasurementPhase::Measured, position - warmup_count + 1)
+    };
+    if record.attempt_number != 1
+        || record.phase != phase
+        || record.repetition_index != repetition_index
+        || record.sample_index != 1
+        || record.latency_micros == 0
+        || record.time_to_first_token_micros == 0
+        || record.time_to_first_token_micros > record.latency_micros
+        || record.throughput_milli_requests_per_second == 0
+        || record.successful_requests != plan.experiment.spec.workload.requests
+        || record.failed_requests != 0
+        || prior_generator.is_some_and(|generator| generator != record.generator)
+    {
+        return invalid_measurements(&format!(
+            "aggregate record {} does not match the resolved execution",
+            position + 1
+        ));
+    }
+
+    match &plan.experiment.spec.runtime {
+        RuntimeSpec::LocalFake { .. } => {
+            if record.generator != LOCAL_FAKE_GENERATOR_VERSION
+                || !record.request_observations.is_empty()
+            {
+                return invalid_measurements("localFake measurement contract is not supported");
+            }
+        }
+        RuntimeSpec::CpuProbe { .. } => {
+            if record.generator != CPU_PROBE_GENERATOR_VERSION
+                || !record.request_observations.is_empty()
+            {
+                return invalid_measurements("cpuProbe measurement contract is not supported");
+            }
+        }
+        RuntimeSpec::LlamaCpp { .. } => match record.generator.as_str() {
+            LLAMA_CPP_GENERATOR_VERSION_V1 if record.request_observations.is_empty() => {}
+            LLAMA_CPP_GENERATOR_VERSION => {
+                if record.request_observations.len()
+                    != plan.experiment.spec.workload.requests as usize
+                {
+                    return invalid_measurements(
+                        "llamaCpp v2 request-observation cardinality does not match workload.requests",
+                    );
+                }
+                for (index, observation) in record.request_observations.iter().enumerate() {
+                    if observation.request_index != index as u32 + 1
+                        || observation.latency_micros == 0
+                        || observation.time_to_first_token_micros == 0
+                        || observation.time_to_first_token_micros > observation.latency_micros
+                    {
+                        return invalid_measurements(
+                            "llamaCpp v2 request observation is out of order or invalid",
+                        );
+                    }
+                }
+            }
+            _ => return invalid_measurements("llamaCpp measurement generator is not supported"),
+        },
+        RuntimeSpec::Vllm { .. } => {
+            return invalid_measurements("vLLM execution evidence is not supported")
+        }
+    }
+    Ok(())
+}
+
 fn validate_attempt_resources(
     resources: &AttemptResources,
     manifest: &EvidenceManifest,
+    plan: &ResolvedExperiment,
 ) -> Result<(), EvidenceError> {
     if resources.format != ATTEMPT_RESOURCES_FORMAT_V1 {
         return invalid_resources("unsupported format");
@@ -624,12 +907,28 @@ fn validate_attempt_resources(
     if !resources.peak_rss_bytes.is_multiple_of(1024) {
         return invalid_resources("peakRssBytes is not an exact Linux KiB-to-byte conversion");
     }
+    if resources.scope != ResourceScope::HelperProcessLifetime
+        || !matches!(
+            (
+                &plan.experiment.spec.provider,
+                &plan.experiment.spec.runtime
+            ),
+            (
+                ProviderSpec::Local,
+                RuntimeSpec::CpuProbe { .. } | RuntimeSpec::LlamaCpp { .. }
+            )
+        )
+    {
+        return invalid_resources("resource scope does not apply to the resolved runtime");
+    }
     Ok(())
 }
 
 fn validate_attempt_provenance(
     provenance: &AttemptProvenance,
     manifest: &EvidenceManifest,
+    plan: &ResolvedExperiment,
+    measurement_generator: Option<&str>,
 ) -> Result<(), EvidenceError> {
     if provenance.format != ATTEMPT_PROVENANCE_FORMAT_V1 {
         return invalid_provenance("unsupported format");
@@ -671,33 +970,45 @@ fn validate_attempt_provenance(
         "software.benchplane.nixStorePath",
     )?;
 
-    match &provenance.software.runtime {
-        RuntimeProvenance::LocalFake { generator } => {
+    match (&provenance.software.runtime, &plan.experiment.spec.runtime) {
+        (RuntimeProvenance::LocalFake { generator }, RuntimeSpec::LocalFake { .. }) => {
             if generator != LOCAL_FAKE_GENERATOR_VERSION {
                 return invalid_provenance("localFake generator identity is not supported");
             }
+            require_matching_generator(generator, measurement_generator)?;
         }
-        RuntimeProvenance::CpuProbe { generator } => {
+        (RuntimeProvenance::CpuProbe { generator }, RuntimeSpec::CpuProbe { .. }) => {
             if generator != CPU_PROBE_GENERATOR_VERSION {
                 return invalid_provenance("cpuProbe generator identity is not supported");
             }
+            require_matching_generator(generator, measurement_generator)?;
         }
-        RuntimeProvenance::LlamaCpp {
-            generator,
-            engine,
-            model,
-            backend,
-        } => {
-            if generator != LLAMA_CPP_GENERATOR_VERSION
-                || engine.name != LLAMA_CPP_ENGINE_NAME
+        (
+            RuntimeProvenance::LlamaCpp {
+                generator,
+                engine,
+                model,
+                backend,
+            },
+            RuntimeSpec::LlamaCpp {
+                model: resolved_model,
+                ..
+            },
+        ) => {
+            if !matches!(
+                generator.as_str(),
+                LLAMA_CPP_GENERATOR_VERSION_V1 | LLAMA_CPP_GENERATOR_VERSION
+            ) || engine.name != LLAMA_CPP_ENGINE_NAME
                 || engine.version != LLAMA_CPP_ENGINE_VERSION
                 || model.identity != LLAMA_CPP_MODEL_IDENTITY
+                || &model.identity != resolved_model
                 || model.sha256 != LLAMA_CPP_MODEL_SHA256
                 || backend.identity != LLAMA_CPP_BACKEND_IDENTITY
                 || backend.device_class != DeviceClass::Cpu
             {
                 return invalid_provenance("llamaCpp software lineage is not supported");
             }
+            require_matching_generator(generator, measurement_generator)?;
             optional_nix_store_path(
                 engine.nix_store_path.as_deref(),
                 "runtime.engine.nixStorePath",
@@ -728,6 +1039,17 @@ fn validate_attempt_provenance(
                 );
             }
         }
+        _ => return invalid_provenance("runtime kind does not match the resolved plan"),
+    }
+    Ok(())
+}
+
+fn require_matching_generator(
+    provenance_generator: &str,
+    measurement_generator: Option<&str>,
+) -> Result<(), EvidenceError> {
+    if measurement_generator.is_some_and(|generator| generator != provenance_generator) {
+        return invalid_provenance("runtime generator does not match measurements");
     }
     Ok(())
 }
@@ -786,6 +1108,10 @@ fn invalid_resources<T>(message: &str) -> Result<T, EvidenceError> {
     Err(EvidenceError::InvalidAttemptResources(message.to_owned()))
 }
 
+fn invalid_measurements<T>(message: &str) -> Result<T, EvidenceError> {
+    Err(EvidenceError::InvalidMeasurements(message.to_owned()))
+}
+
 fn is_run_id(value: &str) -> bool {
     let Some(uuid_text) = value.strip_prefix("run-") else {
         return false;
@@ -810,7 +1136,9 @@ fn is_sha256_digest(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benchplane_schema::{RunState, ValidityStatus, EVIDENCE_FORMAT_V1};
+    use benchplane_schema::{
+        Experiment, RequestObservation, RunState, ValidityStatus, EVIDENCE_FORMAT_V1,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -916,23 +1244,8 @@ mod tests {
                     "nixStorePath": null
                 },
                 "runtime": {
-                    "kind": "llamaCpp",
-                    "generator": LLAMA_CPP_GENERATOR_VERSION,
-                    "engine": {
-                        "name": LLAMA_CPP_ENGINE_NAME,
-                        "version": LLAMA_CPP_ENGINE_VERSION,
-                        "nixStorePath": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-llama-cpp-b10133"
-                    },
-                    "model": {
-                        "identity": LLAMA_CPP_MODEL_IDENTITY,
-                        "sha256": LLAMA_CPP_MODEL_SHA256,
-                        "nixStorePath": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-smollm2.gguf"
-                    },
-                    "backend": {
-                        "identity": LLAMA_CPP_BACKEND_IDENTITY,
-                        "deviceClass": "cpu",
-                        "nixStorePath": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-llama-cpp-b10133"
-                    }
+                    "kind": "localFake",
+                    "generator": LOCAL_FAKE_GENERATOR_VERSION
                 }
             }
         }))
@@ -967,10 +1280,343 @@ mod tests {
         .expect("write resources");
     }
 
+    fn llama_plan() -> ResolvedExperiment {
+        let experiment: Experiment = serde_json::from_value(serde_json::json!({
+            "apiVersion": "benchplane/v1alpha1",
+            "kind": "Experiment",
+            "metadata": { "name": "llama-evidence" },
+            "spec": {
+                "provider": { "kind": "local" },
+                "runtime": {
+                    "kind": "llamaCpp",
+                    "model": LLAMA_CPP_MODEL_IDENTITY,
+                    "outputTokens": 4
+                },
+                "workload": {
+                    "profile": "smollm2-chat-greedy-v1",
+                    "requests": 2,
+                    "concurrency": 1
+                },
+                "measurement": { "warmupRuns": 1, "repetitions": 2 },
+                "budget": { "maximumCostUsd": 0 },
+                "lifecycle": { "maximumRuntimeSeconds": 120 }
+            }
+        }))
+        .expect("llama experiment");
+        crate::resolution::resolve_experiment(experiment).expect("resolve llama experiment")
+    }
+
+    fn llama_measurement(
+        generator: &str,
+        phase: MeasurementPhase,
+        repetition_index: u32,
+    ) -> MeasurementRecord {
+        let request_observations = if generator == LLAMA_CPP_GENERATOR_VERSION {
+            vec![
+                RequestObservation {
+                    request_index: 1,
+                    latency_micros: 19,
+                    time_to_first_token_micros: 9,
+                },
+                RequestObservation {
+                    request_index: 2,
+                    latency_micros: 21,
+                    time_to_first_token_micros: 11,
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+        MeasurementRecord {
+            generator: generator.to_owned(),
+            attempt_number: 1,
+            phase,
+            repetition_index,
+            sample_index: 1,
+            latency_micros: 20,
+            time_to_first_token_micros: 10,
+            throughput_milli_requests_per_second: 1_000,
+            successful_requests: 2,
+            failed_requests: 0,
+            request_observations,
+        }
+    }
+
+    fn write_measurements(root: &Path, measurements: &[MeasurementRecord]) {
+        let mut bytes = Vec::new();
+        for measurement in measurements {
+            serde_json::to_writer(&mut bytes, measurement).expect("serialize measurement");
+            bytes.push(b'\n');
+        }
+        fs::write(root.join("attempts/0001/measurements.jsonl"), bytes)
+            .expect("write measurements");
+    }
+
+    fn llama_provenance(generator: &str) -> AttemptProvenance {
+        let mut provenance = valid_provenance();
+        provenance.software.runtime = serde_json::from_value(serde_json::json!({
+            "kind": "llamaCpp",
+            "generator": generator,
+            "engine": {
+                "name": LLAMA_CPP_ENGINE_NAME,
+                "version": LLAMA_CPP_ENGINE_VERSION,
+                "nixStorePath": null
+            },
+            "model": {
+                "identity": LLAMA_CPP_MODEL_IDENTITY,
+                "sha256": LLAMA_CPP_MODEL_SHA256,
+                "nixStorePath": null
+            },
+            "backend": {
+                "identity": LLAMA_CPP_BACKEND_IDENTITY,
+                "deviceClass": "cpu",
+                "nixStorePath": null
+            }
+        }))
+        .expect("llama provenance runtime");
+        provenance
+    }
+
+    fn llama_fixture(label: &str, generator: &str) -> TestDirectory {
+        let directory = copy_fixture(label);
+        let plan = llama_plan();
+        fs::write(
+            directory.path.join("resolved-plan.json"),
+            serde_json::to_vec_pretty(&plan).expect("serialize plan"),
+        )
+        .expect("write plan");
+
+        let mut manifest: EvidenceManifest = serde_json::from_slice(
+            &fs::read(directory.path.join("manifest.json")).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        manifest.experiment_digest = plan.experiment_digest.clone();
+        manifest.resolved_plan_digest = plan.resolved_plan_digest.clone();
+        fs::write(
+            directory.path.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let mut run: RunRecord =
+            serde_json::from_slice(&fs::read(directory.path.join("run.json")).expect("read run"))
+                .expect("parse run");
+        run.experiment_digest = plan.experiment_digest.clone();
+        run.resolved_plan_digest = plan.resolved_plan_digest.clone();
+        fs::write(
+            directory.path.join("run.json"),
+            serde_json::to_vec_pretty(&run).expect("serialize run"),
+        )
+        .expect("write run");
+
+        let mut summary: RunSummary = serde_json::from_slice(
+            &fs::read(directory.path.join("summary.json")).expect("read summary"),
+        )
+        .expect("parse summary");
+        summary.sample_count = 2;
+        summary.experiment_digest = plan.experiment_digest.clone();
+        summary.resolved_plan_digest = plan.resolved_plan_digest.clone();
+        fs::write(
+            directory.path.join("summary.json"),
+            serde_json::to_vec_pretty(&summary).expect("serialize summary"),
+        )
+        .expect("write summary");
+
+        let mut validity: ValidityResult = serde_json::from_slice(
+            &fs::read(directory.path.join("validity.json")).expect("read validity"),
+        )
+        .expect("parse validity");
+        validity.required_samples = 2;
+        validity.observed_samples = 2;
+        fs::write(
+            directory.path.join("validity.json"),
+            serde_json::to_vec_pretty(&validity).expect("serialize validity"),
+        )
+        .expect("write validity");
+
+        write_measurements(
+            &directory.path,
+            &[
+                llama_measurement(generator, MeasurementPhase::Warmup, 1),
+                llama_measurement(generator, MeasurementPhase::Measured, 1),
+                llama_measurement(generator, MeasurementPhase::Measured, 2),
+            ],
+        );
+        write_provenance(&directory.path, &llama_provenance(generator));
+        write_resources(&directory.path, &valid_resources());
+        rewrite_checksums(&directory.path);
+        directory
+    }
+
+    fn read_measurements(root: &Path) -> Vec<MeasurementRecord> {
+        fs::read_to_string(root.join("attempts/0001/measurements.jsonl"))
+            .expect("read measurements")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("parse measurement"))
+            .collect()
+    }
+
     #[test]
     fn verifies_the_checked_in_fixture() {
         let manifest = verify_evidence_bundle(&fixture_root()).expect("fixture should verify");
         assert_eq!(manifest.format, EVIDENCE_FORMAT_V1);
+    }
+
+    #[test]
+    fn verifies_historical_and_current_llama_measurement_lineage() {
+        for (label, generator) in [
+            ("v1", LLAMA_CPP_GENERATOR_VERSION_V1),
+            ("v2", LLAMA_CPP_GENERATOR_VERSION),
+        ] {
+            let directory = llama_fixture(&format!("llama-{label}"), generator);
+            verify_evidence_bundle(&directory.path).expect("known llama lineage should verify");
+            let records = read_measurements(&directory.path);
+            assert_eq!(records.len(), 3);
+            let observations: usize = records
+                .iter()
+                .map(|record| record.request_observations.len())
+                .sum();
+            assert_eq!(
+                observations,
+                if generator == LLAMA_CPP_GENERATOR_VERSION {
+                    6
+                } else {
+                    0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_llama_request_observation_sequences() {
+        for mode in ["missing", "extra", "order", "zero", "ttft"] {
+            let directory = llama_fixture(
+                &format!("llama-observation-{mode}"),
+                LLAMA_CPP_GENERATOR_VERSION,
+            );
+            let mut records = read_measurements(&directory.path);
+            match mode {
+                "missing" => {
+                    records[0].request_observations.pop();
+                }
+                "extra" => {
+                    records[0].request_observations.push(RequestObservation {
+                        request_index: 3,
+                        latency_micros: 22,
+                        time_to_first_token_micros: 12,
+                    });
+                }
+                "order" => {
+                    records[0].request_observations.swap(0, 1);
+                }
+                "zero" => {
+                    records[0].request_observations[0].latency_micros = 0;
+                }
+                "ttft" => {
+                    records[0].request_observations[0].time_to_first_token_micros = 20;
+                    records[0].request_observations[0].latency_micros = 19;
+                }
+                _ => unreachable!(),
+            };
+            write_measurements(&directory.path, &records);
+            rewrite_checksums(&directory.path);
+            assert!(
+                matches!(
+                    verify_evidence_bundle(&directory.path),
+                    Err(EvidenceError::InvalidMeasurements(_))
+                ),
+                "mode={mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_missing_extra_malformed_and_mismatched_llama_measurements() {
+        for mode in ["missing-record", "extra-record", "phase", "generator"] {
+            let directory = llama_fixture(
+                &format!("llama-measurement-{mode}"),
+                LLAMA_CPP_GENERATOR_VERSION,
+            );
+            let mut records = read_measurements(&directory.path);
+            match mode {
+                "missing-record" => {
+                    records.pop();
+                }
+                "extra-record" => records.push(llama_measurement(
+                    LLAMA_CPP_GENERATOR_VERSION,
+                    MeasurementPhase::Measured,
+                    3,
+                )),
+                "phase" => records[0].phase = MeasurementPhase::Measured,
+                "generator" => records[0].generator = CPU_PROBE_GENERATOR_VERSION.to_owned(),
+                _ => unreachable!(),
+            }
+            write_measurements(&directory.path, &records);
+            rewrite_checksums(&directory.path);
+            assert!(
+                matches!(
+                    verify_evidence_bundle(&directory.path),
+                    Err(EvidenceError::InvalidMeasurements(_))
+                ),
+                "mode={mode}"
+            );
+        }
+
+        let malformed = llama_fixture("llama-malformed-measurement", LLAMA_CPP_GENERATOR_VERSION);
+        fs::write(
+            malformed.path.join("attempts/0001/measurements.jsonl"),
+            b"{not-json}\n",
+        )
+        .expect("write malformed measurement");
+        rewrite_checksums(&malformed.path);
+        assert!(matches!(
+            verify_evidence_bundle(&malformed.path),
+            Err(EvidenceError::InvalidRecord { path, .. })
+                if path == "attempts/0001/measurements.jsonl"
+        ));
+    }
+
+    #[test]
+    fn rejects_resolved_plan_provenance_and_resource_runtime_mismatches() {
+        let provenance_mismatch = llama_fixture(
+            "llama-provenance-runtime-mismatch",
+            LLAMA_CPP_GENERATOR_VERSION,
+        );
+        let mut provenance: AttemptProvenance = serde_json::from_slice(
+            &fs::read(
+                provenance_mismatch
+                    .path
+                    .join("attempts/0001/provenance.json"),
+            )
+            .expect("read provenance"),
+        )
+        .expect("parse provenance");
+        provenance.software.runtime = RuntimeProvenance::CpuProbe {
+            generator: CPU_PROBE_GENERATOR_VERSION.to_owned(),
+        };
+        write_provenance(&provenance_mismatch.path, &provenance);
+        rewrite_checksums(&provenance_mismatch.path);
+        assert!(matches!(
+            verify_evidence_bundle(&provenance_mismatch.path),
+            Err(EvidenceError::InvalidAttemptProvenance(_))
+        ));
+
+        let plan_mismatch = llama_fixture("llama-plan-mismatch", LLAMA_CPP_GENERATOR_VERSION);
+        let mut plan: ResolvedExperiment = serde_json::from_slice(
+            &fs::read(plan_mismatch.path.join("resolved-plan.json")).expect("read plan"),
+        )
+        .expect("parse plan");
+        plan.experiment.spec.workload.requests = 3;
+        fs::write(
+            plan_mismatch.path.join("resolved-plan.json"),
+            serde_json::to_vec_pretty(&plan).expect("serialize mismatched plan"),
+        )
+        .expect("write mismatched plan");
+        rewrite_checksums(&plan_mismatch.path);
+        assert!(matches!(
+            verify_evidence_bundle(&plan_mismatch.path),
+            Err(EvidenceError::InvalidResolvedPlan(_))
+        ));
     }
 
     #[test]
@@ -1040,16 +1686,16 @@ mod tests {
     }
 
     #[test]
-    fn verifies_optional_attempt_resources_and_checksums_them() {
+    fn rejects_helper_resources_for_local_fake_plan() {
         let directory = copy_fixture("attempt-resources");
         write_resources(&directory.path, &valid_resources());
         rewrite_checksums(&directory.path);
 
-        verify_evidence_bundle(&directory.path).expect("resource extension should verify");
-        assert!(fs::read_to_string(directory.path.join("SHA256SUMS"))
-            .expect("read checksums")
-            .lines()
-            .any(|line| line.ends_with("  attempts/0001/resources.json")));
+        assert!(matches!(
+            verify_evidence_bundle(&directory.path),
+            Err(EvidenceError::InvalidAttemptResources(message))
+                if message.contains("does not apply")
+        ));
     }
 
     #[test]
@@ -1278,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn verifies_large_nonparsed_payload_by_streaming() {
+    fn rejects_rechecksummed_malformed_measurement_payload() {
         let directory = copy_fixture("streamed-payload");
         fs::write(
             directory.path.join("attempts/0001/measurements.jsonl"),
@@ -1286,7 +1932,10 @@ mod tests {
         )
         .expect("write large measurement payload");
         rewrite_checksums(&directory.path);
-        verify_evidence_bundle(&directory.path).expect("large payload should be hashable");
+        assert!(matches!(
+            verify_evidence_bundle(&directory.path),
+            Err(EvidenceError::InvalidMeasurements(_))
+        ));
     }
 
     #[test]

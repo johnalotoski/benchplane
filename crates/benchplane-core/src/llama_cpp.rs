@@ -9,12 +9,12 @@ use benchplane_schema::{
     ERROR_LLAMA_CPP_DEADLINE_EXCEEDED, ERROR_LLAMA_CPP_EXIT_FAILED,
     ERROR_LLAMA_CPP_MODEL_INIT_FAILED, ERROR_LLAMA_CPP_OUTPUT_INVALID,
     ERROR_LLAMA_CPP_RESOURCE_ACCOUNTING_FAILED, ERROR_LLAMA_CPP_SPAWN_FAILED,
-    LLAMA_CPP_GENERATOR_VERSION, MAX_LLAMA_CPP_RECORDS,
+    LLAMA_CPP_GENERATOR_VERSION, MAX_LLAMA_CPP_RECORDS, MAX_LLAMA_CPP_REQUEST_OBSERVATIONS,
 };
 use std::{path::Path, process::Command};
 
-const MAX_SERIALIZED_RECORD_BYTES: usize = 512;
-const MAX_STDOUT_BYTES: usize = 64 * 1024;
+const MAX_SERIALIZED_RECORD_BYTES: usize = 16 * 1024;
+const MAX_STDOUT_BYTES: usize = 256 * 1024;
 const MODEL_INIT_EXIT_CODE: i32 = 20;
 const SPECIAL_EXIT_CODES: &[ExitCodeFailure] = &[ExitCodeFailure {
     exit_code: MODEL_INIT_EXIT_CODE,
@@ -90,12 +90,24 @@ fn execute_command(mut command: Command, config: LlamaCppConfig) -> ChildExecuti
 }
 
 fn expected_record_count(config: LlamaCppConfig) -> Result<usize, FailureRecord> {
-    config
+    let count = config
         .warmup_runs
         .checked_add(config.repetitions)
         .filter(|count| *count <= MAX_LLAMA_CPP_RECORDS)
-        .and_then(|count| usize::try_from(count).ok())
-        .ok_or_else(|| protocol_failure("llama.cpp requested excessive measurement records"))
+        .ok_or_else(|| protocol_failure("llama.cpp requested excessive measurement records"))?;
+    u64::from(count)
+        .checked_mul(u64::from(config.requests))
+        .filter(|observations| *observations <= MAX_LLAMA_CPP_REQUEST_OBSERVATIONS)
+        .ok_or_else(|| protocol_failure("llama.cpp requested excessive request observations"))?;
+    let count = usize::try_from(count)
+        .map_err(|_| protocol_failure("llama.cpp measurement count is not representable"))?;
+    count
+        .checked_mul(MAX_SERIALIZED_RECORD_BYTES)
+        .filter(|bytes| *bytes <= MAX_STDOUT_BYTES)
+        .ok_or_else(|| {
+            protocol_failure("llama.cpp requested output exceeds its transport bound")
+        })?;
+    Ok(count)
 }
 
 fn validate_record(
@@ -121,7 +133,18 @@ fn validate_record(
         && record.time_to_first_token_micros <= record.latency_micros
         && record.throughput_milli_requests_per_second > 0
         && record.successful_requests == config.requests
-        && record.failed_requests == 0;
+        && record.failed_requests == 0
+        && record.request_observations.len() == config.requests as usize
+        && record
+            .request_observations
+            .iter()
+            .enumerate()
+            .all(|(position, observation)| {
+                observation.request_index == position as u32 + 1
+                    && observation.latency_micros > 0
+                    && observation.time_to_first_token_micros > 0
+                    && observation.time_to_first_token_micros <= observation.latency_micros
+            });
     if valid {
         Ok(())
     } else {
@@ -145,6 +168,7 @@ fn protocol_failure(message: &str) -> FailureRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benchplane_schema::RequestObservation;
     use std::{
         fs,
         path::PathBuf,
@@ -174,6 +198,18 @@ mod tests {
             throughput_milli_requests_per_second: 1000,
             successful_requests: 2,
             failed_requests: 0,
+            request_observations: vec![
+                RequestObservation {
+                    request_index: 1,
+                    latency_micros: 19,
+                    time_to_first_token_micros: 9,
+                },
+                RequestObservation {
+                    request_index: 2,
+                    latency_micros: 21,
+                    time_to_first_token_micros: 11,
+                },
+            ],
         }
     }
 
@@ -184,6 +220,41 @@ mod tests {
         let mut wrong = record(MeasurementPhase::Measured, 2);
         wrong.successful_requests = 1;
         assert!(validate_record(&wrong, 2, config()).is_err());
+        let mut missing = record(MeasurementPhase::Measured, 2);
+        missing.request_observations.pop();
+        assert!(validate_record(&missing, 2, config()).is_err());
+        let mut out_of_order = record(MeasurementPhase::Measured, 2);
+        out_of_order.request_observations.swap(0, 1);
+        assert!(validate_record(&out_of_order, 2, config()).is_err());
+    }
+
+    #[test]
+    fn maximum_request_observations_fit_the_bounded_transport() {
+        let maximum_observations = usize::try_from(MAX_LLAMA_CPP_REQUEST_OBSERVATIONS)
+            .expect("observation bound fits usize");
+        let mut maximum_record = record(MeasurementPhase::Measured, 1);
+        maximum_record.request_observations = (1..=maximum_observations)
+            .map(|index| RequestObservation {
+                request_index: index as u32,
+                latency_micros: u64::MAX,
+                time_to_first_token_micros: u64::MAX,
+            })
+            .collect();
+        let serialized = serde_json::to_vec(&maximum_record)
+            .expect("serialize maximum request-observation record");
+        assert!(serialized.len() < MAX_SERIALIZED_RECORD_BYTES);
+
+        let maximum = LlamaCppConfig {
+            requests: MAX_LLAMA_CPP_REQUEST_OBSERVATIONS as u32,
+            warmup_runs: 0,
+            repetitions: 1,
+            output_tokens: 1,
+            maximum_runtime_seconds: 1,
+        };
+        assert_eq!(expected_record_count(maximum).expect("maximum fits"), 1);
+        let mut excessive = maximum;
+        excessive.requests += 1;
+        assert!(expected_record_count(excessive).is_err());
     }
 
     #[test]
@@ -219,7 +290,10 @@ fn burn_cpu() {
     std::hint::black_box(value);
 }
 fn record(phase: &str, index: u32) {
-    println!(r#"{{"generator":"benchplane-llama-cpp-smollm2/v1","attemptNumber":1,"phase":"{}","repetitionIndex":{},"sampleIndex":1,"latencyMicros":20,"timeToFirstTokenMicros":10,"throughputMilliRequestsPerSecond":1000,"successfulRequests":2,"failedRequests":0}}"#, phase, index);
+    println!(r#"{{"generator":"benchplane-llama-cpp-smollm2/v2","attemptNumber":1,"phase":"{}","repetitionIndex":{},"sampleIndex":1,"latencyMicros":20,"timeToFirstTokenMicros":10,"throughputMilliRequestsPerSecond":1000,"successfulRequests":2,"failedRequests":0,"requestObservations":[{{"requestIndex":1,"latencyMicros":19,"timeToFirstTokenMicros":9}},{{"requestIndex":2,"latencyMicros":21,"timeToFirstTokenMicros":11}}]}}"#, phase, index);
+}
+fn invalid_observations(value: &str) {
+    println!(r#"{{"generator":"benchplane-llama-cpp-smollm2/v2","attemptNumber":1,"phase":"warmup","repetitionIndex":1,"sampleIndex":1,"latencyMicros":20,"timeToFirstTokenMicros":10,"throughputMilliRequestsPerSecond":1000,"successfulRequests":2,"failedRequests":0,"requestObservations":{}}}"#, value);
 }
 fn main() {
     match env::var("LLAMA_TEST_MODE").as_deref() {
@@ -227,12 +301,16 @@ fn main() {
         Ok("missing") => { record("warmup", 1); record("measured", 1); }
         Ok("duplicate") => { record("warmup", 1); record("warmup", 1); record("measured", 2); }
         Ok("malformed") => println!("not-json"),
+        Ok("missing-observations") => invalid_observations("[]"),
+        Ok("extra-observation") => invalid_observations(r#"[{"requestIndex":1,"latencyMicros":19,"timeToFirstTokenMicros":9},{"requestIndex":2,"latencyMicros":21,"timeToFirstTokenMicros":11},{"requestIndex":3,"latencyMicros":22,"timeToFirstTokenMicros":12}]"#),
+        Ok("observation-order") => invalid_observations(r#"[{"requestIndex":2,"latencyMicros":19,"timeToFirstTokenMicros":9},{"requestIndex":1,"latencyMicros":21,"timeToFirstTokenMicros":11}]"#),
+        Ok("observation-metric") => invalid_observations(r#"[{"requestIndex":1,"latencyMicros":9,"timeToFirstTokenMicros":10},{"requestIndex":2,"latencyMicros":21,"timeToFirstTokenMicros":11}]"#),
         Ok("partial-malformed") => { record("warmup", 1); println!("not-json"); }
         Ok("partial-nonzero") => { record("warmup", 1); std::process::exit(7); }
         Ok("model-init") => std::process::exit(20),
         Ok("nonzero") => { eprintln!("private injected failure"); std::process::exit(7); }
-        Ok("oversized") => println!("{}", "x".repeat(513)),
-        Ok("excessive-total") => print!("{}", "x".repeat(70000)),
+        Ok("oversized") => println!("{}", "x".repeat(16385)),
+        Ok("excessive-total") => print!("{}", "x".repeat(270000)),
         Ok("deadline") => { record("warmup", 1); thread::sleep(Duration::from_secs(5)); }
         _ => std::process::exit(9),
     }
@@ -264,6 +342,11 @@ fn main() {
         assert!(outcome.failure.is_none());
         assert_eq!(outcome.measurements.len(), 3);
         assert_eq!(outcome.measurements[0].phase, MeasurementPhase::Warmup);
+        assert_eq!(outcome.measurements[0].request_observations.len(), 2);
+        assert_eq!(
+            outcome.measurements[0].request_observations[1].request_index,
+            2
+        );
         assert_eq!(outcome.measurements[2].repetition_index, 2);
         assert!(outcome.resources.is_some());
     }
@@ -274,6 +357,10 @@ fn main() {
             "malformed",
             "missing",
             "duplicate",
+            "missing-observations",
+            "extra-observation",
+            "observation-order",
+            "observation-metric",
             "oversized",
             "excessive-total",
         ] {

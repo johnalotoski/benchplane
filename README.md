@@ -21,7 +21,7 @@ Many individual pieces already exist: vLLM packaging, NixOS GPU support, cloud p
 
 ## Current status
 
-This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, capture bounded attempt-scoped execution provenance, execute deterministic local-fake work, a measured local CPU token probe, or real packaged CPU-only model inference, account for supervised helper CPU time and peak RSS, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
+This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, capture bounded attempt-scoped execution provenance, execute deterministic local-fake work, a measured local CPU token probe, or real packaged CPU-only model inference, retain bounded llama.cpp request observations, account for supervised helper CPU time and peak RSS, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
 
 It also establishes the intended boundaries for:
 
@@ -43,6 +43,7 @@ experiment YAML
 → bounded attempt-scoped platform and packaged-software provenance
 → concrete local runtime execution
   (deterministic local-fake, measured CPU probe, or packaged llama.cpp inference)
+→ bounded per-request latency and TTFT observations for llama.cpp
 → exact helper-process lifetime CPU-time and peak-RSS observation, when applicable
 → lifecycle journal, records, measurements, validity, and summary
 → verified evidence finalization
@@ -59,7 +60,7 @@ benchplane run experiments/smoke/local-llama-cpp.yaml
 
 The CPU probe starts the fixed `benchplane-cpu-probe` executable from the same package without a shell. It performs deterministic, data-dependent CPU work and records observed request latency, first-output latency, and request throughput. Timing varies by host and proves only local CPU execution, subprocess supervision, and inference-shaped measurement plumbing—not model, GPU, vLLM, cross-host, or production inference performance.
 
-The `llamaCpp` runtime starts the package-owned `benchplane-llama-cpp` helper without a shell. It uses CPU-only llama.cpp `b10133` to load the fixed [SmolLM2-135M-Instruct Q2_K GGUF](https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF) from the Nix store and perform greedy transformer decoding. The Apache-2.0 model file is exactly 88,201,792 bytes and is pinned at repository commit `c33bd7b3a0c1c5048af630f0198eb2a29977b422` with SHA-256 `55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75`; llama.cpp is MIT-licensed. No model download, network, home directory, credential, GPU, container, arbitrary model path, or arbitrary prompt is used at execution time.
+The `llamaCpp` runtime starts the package-owned `benchplane-llama-cpp` helper without a shell. It uses CPU-only llama.cpp `b10133` to load the fixed [SmolLM2-135M-Instruct Q2_K GGUF](https://huggingface.co/QuantFactory/SmolLM2-135M-Instruct-GGUF) from the Nix store and perform greedy transformer decoding. The Apache-2.0 model file is exactly 88,201,792 bytes and is pinned at repository commit `c33bd7b3a0c1c5048af630f0198eb2a29977b422` with SHA-256 `55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75`; llama.cpp is MIT-licensed. The helper loads the model once, executes configured requests sequentially at concurrency one, and retains bounded request latency and TTFT observations alongside each repetition aggregate. These requests share initialized model state and are not independent runs. No model download, network, home directory, credential, GPU, container, arbitrary model path, or arbitrary prompt is used at execution time.
 
 This tiny quantized fixture is suitable for routine x86-64 and aarch64 CI because it is a real but unusually small 135M-parameter model. It proves actual local model execution and measurement plumbing only. It is not representative of production inference, model quality, cross-host performance, GPU behavior, vLLM behavior, or cloud lifecycle.
 
@@ -68,6 +69,8 @@ The default output root is `.benchplane`; use `--output-root PATH` to select ano
 New bundles also contain `attempts/0001/provenance.json`, an integrity-covered record of the attempt's bounded OS, kernel, architecture, CPU class/availability, Benchplane package, generator, and fixed llama.cpp/model/backend lineage. It intentionally omits hostnames, user identity, machine identifiers, addresses, credentials, and arbitrary environment or inventory data. This context improves attribution but does not authenticate the host or make performance statistically reproducible or comparable across hosts. Historical `benchplane-evidence/v1` bundles without this additive payload remain verifiable.
 
 Helper-backed CPU-probe and llama.cpp runs additionally contain `attempts/0001/resources.json`. It records exact Linux accounting for the supervised helper's full process lifetime: user-plus-system `cpuTimeMicros` and peak resident-set high-water `peakRssBytes`. Llama accounting therefore includes startup, model loading, warmups, measured repetitions, and teardown; it does not change latency or TTFT semantics. These values are not CPU utilization, per-request cost, system-wide or exclusive memory, energy, contention, or a basis for cross-host comparability. In-process `localFake` runs have no equivalent helper observation, and historical evidence-v1 bundles without resources remain verifiable.
+
+For current llama.cpp evidence, every warmup and measured repetition aggregate contains one numeric request observation per configured request. Model initialization remains outside request latency and TTFT. Warmup observations remain excluded from validity and summaries, and the displayed p50/p95 values remain statistics over measured repetition aggregates—not request-tail percentiles. The retained observations enable later distribution analysis, but this slice computes no confidence intervals and makes no independence or cross-host-comparability claim. Historical aggregate-only llama evidence remains verifiable.
 
 The first cloud milestone may later extend this path to one single-GPU vLLM experiment, but AWS and vLLM execution remain intentionally unimplemented.
 

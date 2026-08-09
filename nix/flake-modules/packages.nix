@@ -382,7 +382,7 @@
                 > "$TMPDIR/direct-helper.jsonl"
           )
           ${pkgs.jq}/bin/jq -e -s \
-            'length == 1 and all(.generator == "benchplane-llama-cpp-smollm2/v1") and all(.phase == "measured" and .repetitionIndex == 1 and .latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros and .throughputMilliRequestsPerSecond > 0 and .successfulRequests == 1 and .failedRequests == 0)' \
+            'length == 1 and all(.generator == "benchplane-llama-cpp-smollm2/v2") and all(.phase == "measured" and .repetitionIndex == 1 and .latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros and .throughputMilliRequestsPerSecond > 0 and .successfulRequests == 1 and .failedRequests == 0 and (.requestObservations | length) == 1 and .requestObservations[0].requestIndex == 1 and .requestObservations[0].latencyMicros > 0 and .requestObservations[0].timeToFirstTokenMicros > 0 and .requestObservations[0].timeToFirstTokenMicros <= .requestObservations[0].latencyMicros)' \
             "$TMPDIR/direct-helper.jsonl" > /dev/null
           (
             cd "$ambientCwd"
@@ -398,7 +398,7 @@
              (.resources.peakRssBytes % 1024 == 0)' \
             "$resultFile" > /dev/null
           ${pkgs.jq}/bin/jq -e -s \
-            'length == 4 and all(.generator == "benchplane-llama-cpp-smollm2/v1") and all(.latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros and .throughputMilliRequestsPerSecond > 0 and .successfulRequests == 2 and .failedRequests == 0)' \
+            'length == 4 and all(.generator == "benchplane-llama-cpp-smollm2/v2") and all(.latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros and .throughputMilliRequestsPerSecond > 0 and .successfulRequests == 2 and .failedRequests == 0 and (.requestObservations | length) == 2 and .requestObservations[0].requestIndex == 1 and .requestObservations[1].requestIndex == 2 and all(.requestObservations[]; .latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros)) and ([.[] | .requestObservations[]] | length) == 8 and ([.[] | select(.phase == "warmup") | .requestObservations[]] | length) == 2 and ([.[] | select(.phase == "measured") | .requestObservations[]] | length) == 6' \
             "$bundle/attempts/0001/measurements.jsonl" > /dev/null
           ${pkgs.jq}/bin/jq -e \
             --arg runId "$(${pkgs.jq}/bin/jq -er '.runId' "$resultFile")" \
@@ -415,7 +415,7 @@
              .software.benchplane.version == "0.1.0" and
              .software.benchplane.nixStorePath == $benchplaneStore and
              .software.runtime.kind == "llamaCpp" and
-             .software.runtime.generator == "benchplane-llama-cpp-smollm2/v1" and
+             .software.runtime.generator == "benchplane-llama-cpp-smollm2/v2" and
              .software.runtime.engine.name == "llama.cpp" and
              .software.runtime.engine.version == "b10133" and
              .software.runtime.engine.nixStorePath == $llamaStore and

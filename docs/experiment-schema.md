@@ -58,7 +58,7 @@ workload:
   concurrency: 1
 ```
 
-`model` defaults to the fixed identity and `outputTokens` defaults to `4`; explicit values are retained in the resolved experiment. Generated tokens must be 1–32 and concurrency must equal `1`. Warmups plus measured repetitions may not exceed 16. The checked product `(warmups + repetitions) × requests × (96 maximum fixed-profile prompt tokens + outputTokens)` may not overflow or exceed 8,192 prompt-plus-generated tokens. Requests and repetitions must be positive, the lifecycle maximum remains 1–86,400 seconds, and the local budget must be finite and nonnegative. All semantic checks and provider/runtime compatibility selection occur before UUIDv7 allocation or output-root creation. The package-owned helper independently enforces the record, output-token, prompt-token, and total-token bounds.
+`model` defaults to the fixed identity and `outputTokens` defaults to `4`; explicit values are retained in the resolved experiment. Generated tokens must be 1–32 and concurrency must equal `1`. Warmups plus measured repetitions may not exceed 16. The checked product `(warmups + repetitions) × requests × (96 maximum fixed-profile prompt tokens + outputTokens)` may not overflow or exceed 8,192 prompt-plus-generated tokens. That existing work ceiling also limits one successful execution to at most 84 numeric request observations; no enable/disable field is needed. Requests and repetitions must be positive, the lifecycle maximum remains 1–86,400 seconds, and the local budget must be finite and nonnegative. All semantic checks and provider/runtime compatibility selection occur before UUIDv7 allocation or output-root creation. The package-owned helper independently enforces the record, observation, output-token, prompt-token, and total-token bounds.
 
 No public field can select an executable, model path, model URL/repository/revision, prompt, environment, working directory, network address, sampler, thread count, or general llama.cpp option. Request-index variation is derived deterministically inside the fixed profile.
 
@@ -70,7 +70,7 @@ Benchplane semantic validation applies restrictions that are awkward or misleadi
 
 Consumers must not treat JSON Schema acceptance as a substitute for `benchplane validate`.
 
-Attempt provenance and supervised-helper resource accounting are observed execution evidence, not workload configuration. They add no experiment field, enable/disable switch, threshold, budget, or sampling interval; the generated `benchplane/v1alpha1` experiment schema is unchanged by those evidence extensions.
+Attempt provenance, supervised-helper resource accounting, and llama request observations are observed execution evidence, not workload configuration. They add no experiment field, enable/disable switch, threshold, budget, or sampling interval; the generated `benchplane/v1alpha1` experiment schema is unchanged by those evidence extensions.
 
 ## Resolved-experiment digest
 
