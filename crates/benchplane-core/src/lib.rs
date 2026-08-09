@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+compile_error!(
+    "benchplane-core supervised helper execution requires Linux wait4 resource accounting; supported systems are x86_64-linux and aarch64-linux"
+);
+
 mod child_supervisor;
 mod cpu_probe;
 pub mod evidence;

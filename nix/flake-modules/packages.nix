@@ -284,6 +284,7 @@
           ${pkgs.jq}/bin/jq -e \
             '.runState == "succeeded" and .validityStatus == "valid" and
              (.resources.cpuTimeMicros | type == "number") and
+             (.resources.peakRssBytes | type == "number") and
              (.resources.peakRssBytes % 1024 == 0)' \
             result.json > /dev/null
           ${pkgs.jq}/bin/jq -e -s \
@@ -311,6 +312,7 @@
              .runId == $runId and .attemptNumber == 1 and
              .scope == "helperProcessLifetime" and
              (.cpuTimeMicros | type == "number") and
+             (.peakRssBytes | type == "number") and
              (.peakRssBytes % 1024 == 0)' \
             "$bundle/attempts/0001/resources.json" > /dev/null
           grep -F '  attempts/0001/resources.json' "$bundle/SHA256SUMS" > /dev/null
@@ -392,6 +394,7 @@
           ${pkgs.jq}/bin/jq -e \
             '.runState == "succeeded" and .validityStatus == "valid" and
              (.resources.cpuTimeMicros | type == "number") and
+             (.resources.peakRssBytes | type == "number") and
              (.resources.peakRssBytes % 1024 == 0)' \
             "$resultFile" > /dev/null
           ${pkgs.jq}/bin/jq -e -s \
@@ -430,6 +433,7 @@
              .runId == $runId and .attemptNumber == 1 and
              .scope == "helperProcessLifetime" and
              (.cpuTimeMicros | type == "number") and
+             (.peakRssBytes | type == "number") and
              (.peakRssBytes % 1024 == 0)' \
             "$bundle/attempts/0001/resources.json" > /dev/null
           grep -F '  attempts/0001/resources.json' "$bundle/SHA256SUMS" > /dev/null

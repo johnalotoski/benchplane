@@ -35,6 +35,7 @@ cpu-probe-smoke:
       bundle="$(jq -er '.bundlePath' "$smoke_dir/result.json")"; \
       jq -e '.runState == "succeeded" and .validityStatus == "valid" \
         and (.resources.cpuTimeMicros | type == "number") \
+        and (.resources.peakRssBytes | type == "number") \
         and (.resources.peakRssBytes % 1024 == 0)' \
         "$smoke_dir/result.json" > /dev/null; \
       jq -e --arg runId "$(jq -er '.runId' "$smoke_dir/result.json")" \
@@ -42,6 +43,7 @@ cpu-probe-smoke:
           and .runId == $runId and .attemptNumber == 1 \
           and .scope == "helperProcessLifetime" \
           and (.cpuTimeMicros | type == "number") \
+          and (.peakRssBytes | type == "number") \
           and (.peakRssBytes % 1024 == 0)' \
         "$bundle/attempts/0001/resources.json" > /dev/null; \
       jq -e -s 'length == 4 and all(.generator == "benchplane-cpu-probe/v1") \
