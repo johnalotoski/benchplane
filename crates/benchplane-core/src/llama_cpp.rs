@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    child_supervisor::{self, ChildProtocol, ExitCodeFailure},
+    child_supervisor::{self, ChildExecution, ChildProtocol, ExitCodeFailure},
     execution::ExecutionOutput,
 };
 use benchplane_schema::{
     FailureRecord, MeasurementPhase, MeasurementRecord, RunState,
     ERROR_LLAMA_CPP_DEADLINE_EXCEEDED, ERROR_LLAMA_CPP_EXIT_FAILED,
     ERROR_LLAMA_CPP_MODEL_INIT_FAILED, ERROR_LLAMA_CPP_OUTPUT_INVALID,
-    ERROR_LLAMA_CPP_SPAWN_FAILED, LLAMA_CPP_GENERATOR_VERSION, MAX_LLAMA_CPP_RECORDS,
+    ERROR_LLAMA_CPP_RESOURCE_ACCOUNTING_FAILED, ERROR_LLAMA_CPP_SPAWN_FAILED,
+    LLAMA_CPP_GENERATOR_VERSION, MAX_LLAMA_CPP_RECORDS,
 };
 use std::{path::Path, process::Command};
 
@@ -40,26 +41,25 @@ pub(crate) fn execute(executable: &Path, config: LlamaCppConfig) -> ExecutionOut
     into_execution_output(execute_command(command, config))
 }
 
-fn into_execution_output(result: Result<Vec<MeasurementRecord>, FailureRecord>) -> ExecutionOutput {
-    match result {
-        Ok(measurements) => ExecutionOutput {
-            measurements,
-            terminal_state: RunState::Succeeded,
-            failure: None,
-        },
-        Err(failure) => ExecutionOutput {
-            measurements: Vec::new(),
-            terminal_state: RunState::Failed,
-            failure: Some(failure),
-        },
+fn into_execution_output(result: ChildExecution) -> ExecutionOutput {
+    let terminal_state = if result.failure.is_none() {
+        RunState::Succeeded
+    } else {
+        RunState::Failed
+    };
+    ExecutionOutput {
+        measurements: result.measurements,
+        resources: result.resources,
+        terminal_state,
+        failure: result.failure,
     }
 }
 
-fn execute_command(
-    mut command: Command,
-    config: LlamaCppConfig,
-) -> Result<Vec<MeasurementRecord>, FailureRecord> {
-    let expected_records = expected_record_count(config)?;
+fn execute_command(mut command: Command, config: LlamaCppConfig) -> ChildExecution {
+    let expected_records = match expected_record_count(config) {
+        Ok(count) => count,
+        Err(failure) => return ChildExecution::failed(failure, None),
+    };
     command
         .arg("--requests")
         .arg(config.requests.to_string())
@@ -82,6 +82,7 @@ fn execute_command(
             exit_failure_code: ERROR_LLAMA_CPP_EXIT_FAILED,
             output_failure_code: ERROR_LLAMA_CPP_OUTPUT_INVALID,
             deadline_failure_code: ERROR_LLAMA_CPP_DEADLINE_EXCEEDED,
+            resource_failure_code: ERROR_LLAMA_CPP_RESOURCE_ACCOUNTING_FAILED,
             special_exit_codes: SPECIAL_EXIT_CODES,
         },
         |record, position| validate_record(record, position, config),
@@ -210,12 +211,19 @@ mod tests {
                     &source,
                     r###"
 use std::{env, thread, time::Duration};
+fn burn_cpu() {
+    let mut value = 1_u64;
+    for index in 0..5_000_000_u64 {
+        value = value.wrapping_mul(6364136223846793005).wrapping_add(index);
+    }
+    std::hint::black_box(value);
+}
 fn record(phase: &str, index: u32) {
     println!(r#"{{"generator":"benchplane-llama-cpp-smollm2/v1","attemptNumber":1,"phase":"{}","repetitionIndex":{},"sampleIndex":1,"latencyMicros":20,"timeToFirstTokenMicros":10,"throughputMilliRequestsPerSecond":1000,"successfulRequests":2,"failedRequests":0}}"#, phase, index);
 }
 fn main() {
     match env::var("LLAMA_TEST_MODE").as_deref() {
-        Ok("success") => { record("warmup", 1); record("measured", 1); record("measured", 2); }
+        Ok("success") => { burn_cpu(); record("warmup", 1); record("measured", 1); record("measured", 2); }
         Ok("missing") => { record("warmup", 1); record("measured", 1); }
         Ok("duplicate") => { record("warmup", 1); record("warmup", 1); record("measured", 2); }
         Ok("malformed") => println!("not-json"),
@@ -244,7 +252,7 @@ fn main() {
             .as_path()
     }
 
-    fn injected(mode: &str) -> Result<Vec<MeasurementRecord>, FailureRecord> {
+    fn injected(mode: &str) -> ChildExecution {
         let mut command = Command::new(test_child());
         command.env("LLAMA_TEST_MODE", mode);
         execute_command(command, config())
@@ -252,10 +260,12 @@ fn main() {
 
     #[test]
     fn complete_protocol_succeeds() {
-        let records = injected("success").expect("protocol succeeds");
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0].phase, MeasurementPhase::Warmup);
-        assert_eq!(records[2].repetition_index, 2);
+        let outcome = injected("success");
+        assert!(outcome.failure.is_none());
+        assert_eq!(outcome.measurements.len(), 3);
+        assert_eq!(outcome.measurements[0].phase, MeasurementPhase::Warmup);
+        assert_eq!(outcome.measurements[2].repetition_index, 2);
+        assert!(outcome.resources.is_some());
     }
 
     #[test]
@@ -268,7 +278,10 @@ fn main() {
             "excessive-total",
         ] {
             assert_eq!(
-                injected(mode).expect_err("invalid protocol must fail").code,
+                injected(mode)
+                    .failure
+                    .expect("invalid protocol must fail")
+                    .code,
                 ERROR_LLAMA_CPP_OUTPUT_INVALID,
                 "mode={mode}"
             );
@@ -279,12 +292,13 @@ fn main() {
     fn model_initialization_and_other_nonzero_exits_are_distinct() {
         assert_eq!(
             injected("model-init")
-                .expect_err("model init must fail")
+                .failure
+                .expect("model init must fail")
                 .code,
             ERROR_LLAMA_CPP_MODEL_INIT_FAILED
         );
         assert_eq!(
-            injected("nonzero").expect_err("nonzero must fail").code,
+            injected("nonzero").failure.expect("nonzero must fail").code,
             ERROR_LLAMA_CPP_EXIT_FAILED
         );
     }
@@ -299,6 +313,13 @@ fn main() {
             assert_eq!(output.terminal_state, RunState::Failed, "mode={mode}");
             assert!(output.measurements.is_empty(), "mode={mode}");
             assert_eq!(output.failure.expect("failure").code, code, "mode={mode}");
+        }
+    }
+
+    #[test]
+    fn failed_and_timed_out_children_retain_exact_resources() {
+        for mode in ["nonzero", "partial-malformed", "deadline"] {
+            assert!(injected(mode).resources.is_some(), "mode={mode}");
         }
     }
 

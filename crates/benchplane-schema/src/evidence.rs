@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const ATTEMPT_PROVENANCE_FORMAT_V1: &str = "benchplane-attempt-provenance/v1";
+pub const ATTEMPT_RESOURCES_FORMAT_V1: &str = "benchplane-attempt-resources/v1";
 pub const BENCHPLANE_SOFTWARE_NAME: &str = "benchplane";
 pub const LLAMA_CPP_ENGINE_NAME: &str = "llama.cpp";
 pub const LLAMA_CPP_ENGINE_VERSION: &str = "b10133";
@@ -21,11 +22,13 @@ pub const ERROR_CPU_PROBE_SPAWN_FAILED: &str = "cpuProbe.spawnFailed";
 pub const ERROR_CPU_PROBE_EXIT_FAILED: &str = "cpuProbe.exitFailed";
 pub const ERROR_CPU_PROBE_OUTPUT_INVALID: &str = "cpuProbe.outputInvalid";
 pub const ERROR_CPU_PROBE_DEADLINE_EXCEEDED: &str = "cpuProbe.deadlineExceeded";
+pub const ERROR_CPU_PROBE_RESOURCE_ACCOUNTING_FAILED: &str = "cpuProbe.resourceAccountingFailed";
 pub const ERROR_LLAMA_CPP_SPAWN_FAILED: &str = "llamaCpp.spawnFailed";
 pub const ERROR_LLAMA_CPP_MODEL_INIT_FAILED: &str = "llamaCpp.modelInitFailed";
 pub const ERROR_LLAMA_CPP_EXIT_FAILED: &str = "llamaCpp.exitFailed";
 pub const ERROR_LLAMA_CPP_OUTPUT_INVALID: &str = "llamaCpp.outputInvalid";
 pub const ERROR_LLAMA_CPP_DEADLINE_EXCEEDED: &str = "llamaCpp.deadlineExceeded";
+pub const ERROR_LLAMA_CPP_RESOURCE_ACCOUNTING_FAILED: &str = "llamaCpp.resourceAccountingFailed";
 
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
@@ -134,6 +137,30 @@ pub struct AttemptProvenance {
     pub attempt_number: u32,
     pub platform: PlatformProvenance,
     pub software: SoftwareProvenance,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ResourceScope {
+    HelperProcessLifetime,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessResources {
+    pub cpu_time_micros: u64,
+    pub peak_rss_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttemptResources {
+    pub format: String,
+    pub run_id: String,
+    pub attempt_number: u32,
+    pub scope: ResourceScope,
+    pub cpu_time_micros: u64,
+    pub peak_rss_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -321,6 +348,7 @@ pub struct RunResult {
     pub sample_count: u32,
     pub latency: Option<LatencySummary>,
     pub mean_throughput_milli_requests_per_second: Option<u64>,
+    pub resources: Option<ProcessResources>,
     pub bundle_path: String,
     pub experiment_digest: String,
     pub resolved_plan_digest: String,

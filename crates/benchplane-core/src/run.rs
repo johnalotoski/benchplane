@@ -10,10 +10,10 @@ use crate::{
     EvidenceError, ParseError, ResolutionError,
 };
 use benchplane_schema::{
-    AttemptRecord, AttemptStatus, EvidenceManifest, FailureRecord, LocalFakeScenario, ProviderSpec,
-    ResolvedExperiment, RunRecord, RunResult, RunState, RuntimeSpec,
-    ERROR_EVIDENCE_FINALIZATION_FAILED, ERROR_EXECUTION_UNSUPPORTED_COMBINATION,
-    EVIDENCE_FORMAT_V1,
+    AttemptRecord, AttemptResources, AttemptStatus, EvidenceManifest, FailureRecord,
+    LocalFakeScenario, ProviderSpec, ResolvedExperiment, ResourceScope, RunRecord, RunResult,
+    RunState, RuntimeSpec, ATTEMPT_RESOURCES_FORMAT_V1, ERROR_EVIDENCE_FINALIZATION_FAILED,
+    ERROR_EXECUTION_UNSUPPORTED_COMBINATION, EVIDENCE_FORMAT_V1,
 };
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -320,6 +320,24 @@ fn run_experiment_with_services(
             ),
             "running",
         )?;
+        if let Some(resources) = execution.resources {
+            let attempt_resources = AttemptResources {
+                format: ATTEMPT_RESOURCES_FORMAT_V1.to_owned(),
+                run_id: run_id.clone(),
+                attempt_number: 1,
+                scope: ResourceScope::HelperProcessLifetime,
+                cpu_time_micros: resources.cpu_time_micros,
+                peak_rss_bytes: resources.peak_rss_bytes,
+            };
+            at(
+                write_json_atomic(
+                    &attempt_directory.join("resources.json"),
+                    &attempt_resources,
+                    "attempt resources",
+                ),
+                "recordingResources",
+            )?;
+        }
         at(
             services
                 .hook
@@ -469,6 +487,7 @@ fn run_experiment_with_services(
             latency: summary.latency,
             mean_throughput_milli_requests_per_second: summary
                 .mean_throughput_milli_requests_per_second,
+            resources: execution.resources,
             bundle_path: final_path.display().to_string(),
             experiment_digest: plan.experiment_digest.clone(),
             resolved_plan_digest: plan.resolved_plan_digest.clone(),
@@ -797,8 +816,9 @@ mod tests {
     use super::*;
     use crate::{verify_evidence_bundle, EvidenceError};
     use benchplane_schema::{
-        AttemptProvenance, LocalFakeScenario, MeasurementRecord, RuntimeProvenance, ValidityStatus,
-        ATTEMPT_PROVENANCE_FORMAT_V1, CPU_PROBE_GENERATOR_VERSION, LLAMA_CPP_ENGINE_VERSION,
+        AttemptProvenance, AttemptResources, LocalFakeScenario, MeasurementRecord, ResourceScope,
+        RuntimeProvenance, ValidityStatus, ATTEMPT_PROVENANCE_FORMAT_V1,
+        ATTEMPT_RESOURCES_FORMAT_V1, CPU_PROBE_GENERATOR_VERSION, LLAMA_CPP_ENGINE_VERSION,
         LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_MODEL_IDENTITY, LLAMA_CPP_MODEL_SHA256,
         LOCAL_FAKE_GENERATOR_VERSION,
     };
@@ -957,6 +977,13 @@ mod tests {
         .expect("parse attempt provenance")
     }
 
+    fn read_resources(bundle: &Path) -> AttemptResources {
+        serde_json::from_slice(
+            &fs::read(bundle.join("attempts/0001/resources.json")).expect("read attempt resources"),
+        )
+        .expect("parse attempt resources")
+    }
+
     fn directory_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         fn collect(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
             for entry in fs::read_dir(directory).expect("read fixture directory") {
@@ -994,6 +1021,8 @@ mod tests {
         assert_eq!(result.run_state, RunState::Succeeded);
         assert_eq!(result.validity_status, ValidityStatus::Valid);
         assert_eq!(result.sample_count, 3);
+        assert!(result.resources.is_none());
+        assert!(!bundle.join("attempts/0001/resources.json").exists());
         assert_eq!(read_attempt(&bundle).status, AttemptStatus::Succeeded);
         let provenance = read_provenance(&bundle);
         assert_eq!(provenance.format, ATTEMPT_PROVENANCE_FORMAT_V1);
@@ -1140,6 +1169,10 @@ mod tests {
         .expect("runtime failure should finalize");
         assert_eq!(result.run_state, RunState::Failed);
         assert_eq!(result.validity_status, ValidityStatus::Indeterminate);
+        assert!(result.resources.is_none());
+        assert!(!Path::new(&result.bundle_path)
+            .join("attempts/0001/resources.json")
+            .exists());
         assert_eq!(
             result.failure.as_ref().map(|failure| failure.code.as_str()),
             Some(benchplane_schema::ERROR_CPU_PROBE_SPAWN_FAILED)
@@ -1154,6 +1187,43 @@ mod tests {
                 if generator == CPU_PROBE_GENERATOR_VERSION
         ));
         verify_evidence_bundle(Path::new(&result.bundle_path)).expect("failed bundle verifies");
+    }
+
+    #[test]
+    fn cpu_probe_nonzero_exit_publishes_failed_resource_evidence() {
+        let directory = TestDirectory::new("cpu-probe-nonzero-resources");
+        let exits_nonzero = PathBuf::from("false");
+        let result = run_experiment_with_services(
+            &cpu_experiment(),
+            &RunOptions {
+                output_root: directory.0.clone(),
+            },
+            &RunServices {
+                clock: &FixedClock,
+                ids: &FixedIds,
+                hook: &NoopRunHook,
+                cpu_probe_executable: Some(&exits_nonzero),
+                llama_cpp_executable: None,
+            },
+        )
+        .expect("runtime failure should finalize");
+        assert_eq!(result.run_state, RunState::Failed);
+        assert_eq!(result.validity_status, ValidityStatus::Indeterminate);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some(benchplane_schema::ERROR_CPU_PROBE_EXIT_FAILED)
+        );
+        let observed = result.resources.expect("reaped child resources");
+        let resources = read_resources(Path::new(&result.bundle_path));
+        assert_eq!(resources.format, ATTEMPT_RESOURCES_FORMAT_V1);
+        assert_eq!(resources.run_id, FIXED_RUN_ID);
+        assert_eq!(resources.attempt_number, 1);
+        assert_eq!(resources.scope, ResourceScope::HelperProcessLifetime);
+        assert_eq!(resources.cpu_time_micros, observed.cpu_time_micros);
+        assert_eq!(resources.peak_rss_bytes, observed.peak_rss_bytes);
+        assert!(read_measurements(Path::new(&result.bundle_path)).is_empty());
+        verify_evidence_bundle(Path::new(&result.bundle_path))
+            .expect("failed resource bundle verifies");
     }
 
     #[test]
@@ -1176,6 +1246,10 @@ mod tests {
         .expect("runtime failure should finalize");
         assert_eq!(result.run_state, RunState::Failed);
         assert_eq!(result.validity_status, ValidityStatus::Indeterminate);
+        assert!(result.resources.is_none());
+        assert!(!Path::new(&result.bundle_path)
+            .join("attempts/0001/resources.json")
+            .exists());
         assert_eq!(
             result.failure.as_ref().map(|failure| failure.code.as_str()),
             Some(benchplane_schema::ERROR_LLAMA_CPP_SPAWN_FAILED)

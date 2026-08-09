@@ -12,6 +12,7 @@ The initial executable evidence format is `benchplane-evidence/v1`:
 │   └── 0001/
 │       ├── attempt.json
 │       ├── provenance.json
+│       ├── resources.json       # supervised helpers only
 │       └── measurements.jsonl
 ├── validity.json
 ├── summary.json
@@ -29,6 +30,12 @@ New runs write `attempts/0001/provenance.json` using record format `benchplane-a
 
 `provenance.json` is an additive evidence-v1 extension: newly generated bundles always contain it, while historical v1 bundles without it remain valid. `SHA256SUMS` covers it like every regular payload. When present, the public verifier retains at most 16 KiB, strictly parses the typed record, checks bounded values and supported software identities, and requires its run ID and attempt number to match the bundle. Recomputed checksums do not make structurally malformed or semantically inconsistent provenance valid.
 
+Supported supervised helper runs write `attempts/0001/resources.json` with record format `benchplane-attempt-resources/v1`. The record has matching run and attempt identities, scope `helperProcessLifetime`, unsigned `cpuTimeMicros`, and unsigned `peakRssBytes`. CPU time is total user plus system CPU time for the exact reaped helper. Peak RSS is Linux's helper-process high-water mark converted from KiB to bytes with checked arithmetic. The record is not part of the repetition sample population or summary.
+
+For llama.cpp this lifetime starts with helper startup and includes backend/model initialization and model loading, warmup and measured repetitions, and teardown through exit/reaping. It intentionally does not subtract initialization or warmups and does not alter the request latency/TTFT definitions below. CPU time is not utilization or attributable per request/repetition; peak RSS is neither system-wide memory nor exclusive physical ownership or model-only memory. Neither field measures contention, energy, power, or GPU resources.
+
+`resources.json` is another additive evidence-v1 extension. Historical bundles without it remain valid, including older bundles without provenance. `SHA256SUMS` covers the payload. When present, the verifier retains at most 4 KiB, strictly parses its format and known scope, checks run/attempt identity and exact Linux KiB-to-byte RSS units, and rejects malformed, oversized, or re-checksummed inconsistent records.
+
 The record deliberately excludes environment variables, credentials, username, home directory, hostname, machine ID, network addresses, cloud identities, serial numbers, and arbitrary `/proc` or command output. These facts improve measurement attribution and software-lineage context but neither authenticate the producer nor establish performance equivalence, statistical reproducibility, or comparability across hosts.
 
 For `benchplane-cpu-probe/v1`, each warmup or measured repetition contributes one aggregate `MeasurementRecord`. `latencyMicros` is mean completed-request latency, `timeToFirstTokenMicros` is mean first-output latency, `throughputMilliRequestsPerSecond` is successful requests divided by repetition wall time, and request counts report completed and failed requests. Summary latency and throughput continue to use only measured, non-warmup records; evidence-v1 gains no TTFT summary field. These timings are observed and nondeterministic even though the resolved plan and workload computation are deterministic.
@@ -37,7 +44,7 @@ For `benchplane-llama-cpp-smollm2/v1`, model/back-end loading occurs once before
 
 Warmup records use the same work and semantics but never contribute to validity sample counts or summary calculations. No generated model text or private prompt content is stored in the protocol or evidence. The resolved experiment supplies the fixed runtime, model, workload profile, and output-token identity; evidence-v1 needs no new field or format version.
 
-Supervised CPU-probe and llama.cpp measurements are committed to the lifecycle only when the helper exits successfully and its complete record sequence validates. Records parsed before a nonzero exit, deadline, malformed trailing record, or other protocol failure are discarded; failed evidence therefore has indeterminate validity and no retained partial measurement prefix.
+Supervised CPU-probe and llama.cpp measurements are committed to the lifecycle only when the helper exits successfully, exact process accounting is available, and its complete record sequence validates. Records parsed before a nonzero exit, deadline, malformed trailing record, accounting failure, or other protocol failure are discarded; failed evidence therefore has indeterminate validity and no retained partial measurement prefix. A nonzero or timed-out child can still have honest attempt resource evidence when accounting was obtained during its final reap. Spawn failure has no child and therefore no resource record.
 
 ## Finalization and publication
 
@@ -51,6 +58,6 @@ Same-filesystem rename provides atomic namespace visibility: consumers do not ob
 
 After publication, the CLI returns an `evidenceDigest` calculated from the exact `SHA256SUMS` bytes. It is intentionally not stored inside the checksummed bundle.
 
-Checksum creation and verification hash payloads through bounded buffers rather than retaining whole-bundle contents. Verification bounds checksum lines, inventory entries, provenance, and the size of other records it must parse; large measurement payloads are never loaded wholesale. It parses `manifest.json` and optional provenance from the exact bounded bytes that passed checksum verification. It rejects malformed or duplicate checksums, missing or extra payloads, absolute or traversing paths, symlinks and canonical-path escapes, non-regular files, unsupported formats, invalid or inconsistent run/attempt identities, malformed provenance, and empty required manifest fields.
+Checksum creation and verification hash payloads through bounded buffers rather than retaining whole-bundle contents. Verification bounds checksum lines, inventory entries, provenance, resources, and the size of other records it must parse; large measurement payloads are never loaded wholesale. It parses `manifest.json` and optional provenance/resources from the exact bounded bytes that passed checksum verification. It rejects malformed or duplicate checksums, missing or extra payloads, absolute or traversing paths, symlinks and canonical-path escapes, non-regular files, unsupported formats, invalid or inconsistent run/attempt identities, malformed provenance/resources, and empty required manifest fields.
 
 Checksums establish integrity and internal consistency relative to `SHA256SUMS`; they do not establish who or which machine produced the bundle, whether that producer was trusted, or whether an attacker changed payloads and then recomputed every checksum. Publisher authenticity requires a separate trust mechanism and is deliberately deferred; this format is not cryptographically authenticated.

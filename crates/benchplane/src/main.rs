@@ -219,6 +219,10 @@ fn print_human_result(result: &RunResult) {
     if let Some(throughput) = result.mean_throughput_milli_requests_per_second {
         println!("mean throughput (mreq/s): {throughput}");
     }
+    if let Some(resources) = result.resources {
+        println!("helper CPU time (µs): {}", resources.cpu_time_micros);
+        println!("helper peak RSS (bytes): {}", resources.peak_rss_bytes);
+    }
     println!("bundle path: {}", result.bundle_path);
     println!("experiment digest: {}", result.experiment_digest);
     println!("resolved-plan digest: {}", result.resolved_plan_digest);

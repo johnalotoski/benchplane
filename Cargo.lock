@@ -102,6 +102,7 @@ dependencies = [
  "benchplane-schema",
  "chrono",
  "hex",
+ "libc",
  "serde",
  "serde-saphyr",
  "serde_json",

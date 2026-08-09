@@ -129,6 +129,11 @@ fn cpu_probe_runs_through_public_cli_and_publishes_observed_measurements() {
     let result: Value = serde_json::from_slice(&output.stdout).expect("run result JSON");
     assert_eq!(result["runState"], "succeeded");
     assert_eq!(result["validityStatus"], "valid");
+    assert!(result["resources"]["cpuTimeMicros"].as_u64().is_some());
+    assert!(result["resources"]["peakRssBytes"]
+        .as_u64()
+        .unwrap()
+        .is_multiple_of(1024));
     let bundle = Path::new(result["bundlePath"].as_str().expect("bundle path"));
     let records: Vec<Value> = fs::read_to_string(bundle.join("attempts/0001/measurements.jsonl"))
         .expect("measurements")
@@ -164,10 +169,30 @@ fn cpu_probe_runs_through_public_cli_and_publishes_observed_measurements() {
     let provenance_text = serde_json::to_string(&provenance).expect("serialize provenance value");
     assert!(!provenance_text.contains("BENCHPLANE_TEST_SECRET"));
     assert!(!provenance_text.contains(SENSITIVE_ENV_SENTINEL));
+    let resources: Value = serde_json::from_slice(
+        &fs::read(bundle.join("attempts/0001/resources.json")).expect("attempt resources"),
+    )
+    .expect("attempt resources JSON");
+    assert_eq!(resources["format"], "benchplane-attempt-resources/v1");
+    assert_eq!(resources["runId"], result["runId"]);
+    assert_eq!(resources["attemptNumber"], 1);
+    assert_eq!(resources["scope"], "helperProcessLifetime");
+    assert_eq!(
+        resources["cpuTimeMicros"],
+        result["resources"]["cpuTimeMicros"]
+    );
+    assert_eq!(
+        resources["peakRssBytes"],
+        result["resources"]["peakRssBytes"]
+    );
     assert!(fs::read_to_string(bundle.join("SHA256SUMS"))
         .expect("checksum inventory")
         .lines()
         .any(|line| line.ends_with("  attempts/0001/provenance.json")));
+    assert!(fs::read_to_string(bundle.join("SHA256SUMS"))
+        .expect("checksum inventory")
+        .lines()
+        .any(|line| line.ends_with("  attempts/0001/resources.json")));
     let verified = benchplane(&[
         "evidence",
         "verify",
@@ -399,6 +424,8 @@ fn run_human_output_reports_the_terminal_result() {
             "missing {expected:?} in {stdout}"
         );
     }
+    assert!(!stdout.contains("helper CPU time"));
+    assert!(!stdout.contains("helper peak RSS"));
 }
 
 #[test]
@@ -424,8 +451,31 @@ fn run_json_output_is_one_object_with_no_stdout_diagnostics() {
     assert_eq!(result["validityStatus"], "valid");
     assert_eq!(result["attemptCount"], 1);
     assert_eq!(result["sampleCount"], 3);
+    assert!(result["resources"].is_null());
     let bundle = Path::new(result["bundlePath"].as_str().expect("bundle path"));
     assert!(bundle.is_dir());
+    assert!(!bundle.join("attempts/0001/resources.json").exists());
+}
+
+#[test]
+fn helper_resources_are_reported_in_human_output() {
+    let directory = TestDirectory::new("cpu-probe-human-resources");
+    let experiment = repository_root().join("experiments/smoke/local-cpu-probe.yaml");
+    let output = benchplane(&[
+        "run",
+        experiment.to_str().expect("UTF-8 experiment path"),
+        "--output-root",
+        directory.path.to_str().expect("UTF-8 output root"),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        output_text(&output.stderr)
+    );
+    let stdout = output_text(&output.stdout);
+    assert!(stdout.contains("helper CPU time (µs):"), "{stdout}");
+    assert!(stdout.contains("helper peak RSS (bytes):"), "{stdout}");
 }
 
 #[test]

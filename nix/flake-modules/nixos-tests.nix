@@ -154,6 +154,9 @@
               provenance = json.loads(machine.succeed(
                   f"cat {shlex.quote(run_directory + '/attempts/0001/provenance.json')}"
               ))
+              resources = json.loads(machine.succeed(
+                  f"cat {shlex.quote(run_directory + '/attempts/0001/resources.json')}"
+              ))
               validity = json.loads(machine.succeed(
                   f"cat {shlex.quote(run_directory + '/validity.json')}"
               ))
@@ -174,6 +177,15 @@
               assert provenance["format"] == "benchplane-attempt-provenance/v1"
               assert provenance["runId"] == run_id
               assert provenance["attemptNumber"] == 1
+              assert resources["format"] == "benchplane-attempt-resources/v1"
+              assert resources["runId"] == run_id
+              assert resources["attemptNumber"] == 1
+              assert resources["scope"] == "helperProcessLifetime"
+              assert isinstance(resources["cpuTimeMicros"], int)
+              assert resources["cpuTimeMicros"] >= 0
+              assert isinstance(resources["peakRssBytes"], int)
+              assert resources["peakRssBytes"] >= 0
+              assert resources["peakRssBytes"] % 1024 == 0
               platform = provenance["platform"]
               assert platform["operatingSystem"]["family"] == "linux"
               assert platform["operatingSystem"]["distribution"] == "nixos"
@@ -219,6 +231,9 @@
               machine.succeed(f"test -s {shlex.quote(run_directory + '/SHA256SUMS')}")
               machine.succeed(
                   f"grep -F '  attempts/0001/provenance.json' {shlex.quote(run_directory + '/SHA256SUMS')}"
+              )
+              machine.succeed(
+                  f"grep -F '  attempts/0001/resources.json' {shlex.quote(run_directory + '/SHA256SUMS')}"
               )
 
               measurements = machine.succeed(

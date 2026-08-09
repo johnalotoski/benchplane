@@ -70,6 +70,8 @@ Benchplane semantic validation applies restrictions that are awkward or misleadi
 
 Consumers must not treat JSON Schema acceptance as a substitute for `benchplane validate`.
 
+Attempt provenance and supervised-helper resource accounting are observed execution evidence, not workload configuration. They add no experiment field, enable/disable switch, threshold, budget, or sampling interval; the generated `benchplane/v1alpha1` experiment schema is unchanged by those evidence extensions.
+
 ## Resolved-experiment digest
 
 Resolution hashes `serde_json::to_vec()` output for the fully parsed, defaulted `Experiment`. Struct fields serialize in their Rust declaration order, and map-valued labels use `BTreeMap`, which orders keys lexically. YAML whitespace, presentation style, and mapping order therefore do not affect the digest after parsing.

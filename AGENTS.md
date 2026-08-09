@@ -8,15 +8,15 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 
 ## Current milestone
 
-Keep the attempt-scoped execution-provenance milestone small and reviewable. Every supported local execution path:
+Keep the attempt-scoped helper-resource-accounting milestone small and reviewable. Every supported supervised local helper path:
 
-1. captures a bounded typed provenance record while attempt 1 is `preparing`, before concrete execution begins;
-2. records only allowlisted OS, kernel, architecture, CPU model/class and logical-CPU availability fields, never generic host inventory or environment;
-3. identifies the Benchplane package and concrete generator, including the pinned llama.cpp `b10133`, fixed SmolLM2 model digest, CPU-only backend lineage, and meaningful Nix-store identities for packaged inference;
-4. stores the checksum-covered payload at `attempts/0001/provenance.json` and verifies its structure and attempt/run identity when present; and
-5. preserves `benchplane-evidence/v1` compatibility by accepting historical bundles that predate the additive provenance payload.
+1. obtains exact per-child Linux accounting at the private reap boundary, never from a process-global child-usage delta;
+2. records helper-process-lifetime user-plus-system CPU time in microseconds and peak RSS in bytes without attributing either value to requests or repetitions;
+3. retains accounting on nonzero-exit and deadline failures when the exact reap observation is available, while preserving the established primary failure and discarding partial measurement output;
+4. stores the checksum-covered payload at `attempts/0001/resources.json` and verifies its bounded type, format, scope, and attempt/run identity when present; and
+5. leaves resources absent for in-process `localFake` and preserves `benchplane-evidence/v1` compatibility for historical bundles without the additive payload.
 
-This milestone improves attribution and reproducibility context; it does not authenticate a host or publisher, establish statistically reproducible or cross-host-comparable performance, measure CPU time or memory, add GPU/vLLM/AWS behavior, add signing or attestation, or introduce generic inventory, telemetry, process, provider, plugin, or controller abstractions. Preserve the fixed packaged inference, bounded child supervision, lifecycle, validity, and publication contracts.
+For llama.cpp the resource scope includes startup, backend/model initialization and loading, warmups, measured repetitions, and teardown. Existing latency/TTFT semantics remain unchanged. This milestone does not measure utilization, system-wide or exclusive memory, energy, contention, GPU resources, or per-request/per-repetition resources; establish statistically reproducible or cross-host-comparable performance; add GPU/vLLM/AWS behavior; or introduce generic telemetry, process, provider, plugin, or controller abstractions. Preserve attempt provenance, package-owned execution, bounded child supervision, lifecycle, validity, and publication contracts.
 
 ## Boundaries
 

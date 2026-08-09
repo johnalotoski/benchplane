@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    child_supervisor::{self, ChildProtocol},
+    child_supervisor::{self, ChildExecution, ChildProtocol},
     execution::ExecutionOutput,
 };
 use benchplane_schema::{
     FailureRecord, MeasurementPhase, MeasurementRecord, RunState, CPU_PROBE_GENERATOR_VERSION,
     ERROR_CPU_PROBE_DEADLINE_EXCEEDED, ERROR_CPU_PROBE_EXIT_FAILED, ERROR_CPU_PROBE_OUTPUT_INVALID,
-    ERROR_CPU_PROBE_SPAWN_FAILED, MAX_CPU_PROBE_RECORDS,
+    ERROR_CPU_PROBE_RESOURCE_ACCOUNTING_FAILED, ERROR_CPU_PROBE_SPAWN_FAILED,
+    MAX_CPU_PROBE_RECORDS,
 };
 use std::{path::Path, process::Command};
 
@@ -35,33 +36,29 @@ pub(crate) fn execute(executable: &Path, config: CpuProbeConfig) -> ExecutionOut
     into_execution_output(execute_inner(executable, config))
 }
 
-fn into_execution_output(result: Result<Vec<MeasurementRecord>, FailureRecord>) -> ExecutionOutput {
-    match result {
-        Ok(measurements) => ExecutionOutput {
-            measurements,
-            terminal_state: RunState::Succeeded,
-            failure: None,
-        },
-        Err(failure) => ExecutionOutput {
-            measurements: Vec::new(),
-            terminal_state: RunState::Failed,
-            failure: Some(failure),
-        },
+fn into_execution_output(result: ChildExecution) -> ExecutionOutput {
+    let terminal_state = if result.failure.is_none() {
+        RunState::Succeeded
+    } else {
+        RunState::Failed
+    };
+    ExecutionOutput {
+        measurements: result.measurements,
+        resources: result.resources,
+        terminal_state,
+        failure: result.failure,
     }
 }
 
-fn execute_inner(
-    executable: &Path,
-    config: CpuProbeConfig,
-) -> Result<Vec<MeasurementRecord>, FailureRecord> {
+fn execute_inner(executable: &Path, config: CpuProbeConfig) -> ChildExecution {
     execute_command(Command::new(executable), config)
 }
 
-fn execute_command(
-    mut command: Command,
-    config: CpuProbeConfig,
-) -> Result<Vec<MeasurementRecord>, FailureRecord> {
-    let expected_count = expected_record_count(config)?;
+fn execute_command(mut command: Command, config: CpuProbeConfig) -> ChildExecution {
+    let expected_count = match expected_record_count(config) {
+        Ok(count) => count,
+        Err(failure) => return ChildExecution::failed(failure, None),
+    };
     command
         .arg("--requests")
         .arg(config.requests.to_string())
@@ -86,6 +83,7 @@ fn execute_command(
             exit_failure_code: ERROR_CPU_PROBE_EXIT_FAILED,
             output_failure_code: ERROR_CPU_PROBE_OUTPUT_INVALID,
             deadline_failure_code: ERROR_CPU_PROBE_DEADLINE_EXCEEDED,
+            resource_failure_code: ERROR_CPU_PROBE_RESOURCE_ACCOUNTING_FAILED,
             special_exit_codes: &[],
         },
         |record, position| validate_record(record, position, config),
@@ -259,12 +257,19 @@ mod tests {
                     &source,
                     r###"
 use std::{env, thread, time::Duration};
+fn burn_cpu() {
+    let mut value = 1_u64;
+    for index in 0..5_000_000_u64 {
+        value = value.wrapping_mul(6364136223846793005).wrapping_add(index);
+    }
+    std::hint::black_box(value);
+}
 fn record(phase: &str, index: u32) {
     println!(r#"{{"generator":"benchplane-cpu-probe/v1","attemptNumber":1,"phase":"{}","repetitionIndex":{},"sampleIndex":1,"latencyMicros":20,"timeToFirstTokenMicros":10,"throughputMilliRequestsPerSecond":1000,"successfulRequests":2,"failedRequests":0}}"#, phase, index);
 }
 fn main() {
     match env::var("PROBE_TEST_MODE").as_deref() {
-        Ok("success") => { record("warmup", 1); record("measured", 1); record("measured", 2); }
+        Ok("success") => { burn_cpu(); record("warmup", 1); record("measured", 1); record("measured", 2); }
         Ok("missing") => { record("warmup", 1); record("measured", 1); }
         Ok("duplicate") => { record("warmup", 1); record("warmup", 1); record("measured", 2); }
         Ok("malformed") => println!("not-json"),
@@ -290,7 +295,7 @@ fn main() {
             .as_path()
     }
 
-    fn injected(mode: &str) -> Result<Vec<MeasurementRecord>, FailureRecord> {
+    fn injected(mode: &str) -> ChildExecution {
         let mut command = Command::new(test_child());
         command.env("PROBE_TEST_MODE", mode);
         execute_command(command, config())
@@ -298,24 +303,38 @@ fn main() {
 
     #[test]
     fn real_child_success_is_parsed_incrementally() {
-        let records = injected("success").expect("test child succeeds");
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0].phase, MeasurementPhase::Warmup);
-        assert_eq!(records[2].repetition_index, 2);
+        let outcome = injected("success");
+        assert!(outcome.failure.is_none());
+        assert_eq!(outcome.measurements.len(), 3);
+        assert_eq!(outcome.measurements[0].phase, MeasurementPhase::Warmup);
+        assert_eq!(outcome.measurements[2].repetition_index, 2);
+        let resources = outcome.resources.expect("exact child resources");
+        assert!(resources.cpu_time_micros > 0);
+        assert!(resources.peak_rss_bytes.is_multiple_of(1024));
     }
 
     #[test]
     fn nonzero_malformed_missing_and_duplicate_outputs_fail() {
         assert_eq!(
-            injected("nonzero").expect_err("nonzero must fail").code,
+            injected("nonzero").failure.expect("nonzero must fail").code,
             ERROR_CPU_PROBE_EXIT_FAILED
         );
         for mode in ["malformed", "missing", "duplicate"] {
             assert_eq!(
-                injected(mode).expect_err("invalid output must fail").code,
+                injected(mode)
+                    .failure
+                    .expect("invalid output must fail")
+                    .code,
                 ERROR_CPU_PROBE_OUTPUT_INVALID,
                 "mode={mode}"
             );
+        }
+    }
+
+    #[test]
+    fn failed_and_timed_out_children_retain_exact_resources() {
+        for mode in ["nonzero", "partial-malformed", "deadline"] {
+            assert!(injected(mode).resources.is_some(), "mode={mode}");
         }
     }
 

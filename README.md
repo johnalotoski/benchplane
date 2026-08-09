@@ -21,7 +21,7 @@ Many individual pieces already exist: vLLM packaging, NixOS GPU support, cloud p
 
 ## Current status
 
-This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, capture bounded attempt-scoped execution provenance, execute deterministic local-fake work, a measured local CPU token probe, or real packaged CPU-only model inference, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
+This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, capture bounded attempt-scoped execution provenance, execute deterministic local-fake work, a measured local CPU token probe, or real packaged CPU-only model inference, account for supervised helper CPU time and peak RSS, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
 
 It also establishes the intended boundaries for:
 
@@ -43,6 +43,7 @@ experiment YAML
 → bounded attempt-scoped platform and packaged-software provenance
 → concrete local runtime execution
   (deterministic local-fake, measured CPU probe, or packaged llama.cpp inference)
+→ exact helper-process lifetime CPU-time and peak-RSS observation, when applicable
 → lifecycle journal, records, measurements, validity, and summary
 → verified evidence finalization
 → same-filesystem atomic publication
@@ -65,6 +66,8 @@ This tiny quantized fixture is suitable for routine x86-64 and aarch64 CI becaus
 The default output root is `.benchplane`; use `--output-root PATH` to select another same-filesystem staging and publication root, and `--json` for one machine-readable result object. The original YAML bytes and the normalized experiment and resolved-plan digests are all retained in the bundle.
 
 New bundles also contain `attempts/0001/provenance.json`, an integrity-covered record of the attempt's bounded OS, kernel, architecture, CPU class/availability, Benchplane package, generator, and fixed llama.cpp/model/backend lineage. It intentionally omits hostnames, user identity, machine identifiers, addresses, credentials, and arbitrary environment or inventory data. This context improves attribution but does not authenticate the host or make performance statistically reproducible or comparable across hosts. Historical `benchplane-evidence/v1` bundles without this additive payload remain verifiable.
+
+Helper-backed CPU-probe and llama.cpp runs additionally contain `attempts/0001/resources.json`. It records exact Linux accounting for the supervised helper's full process lifetime: user-plus-system `cpuTimeMicros` and peak resident-set high-water `peakRssBytes`. Llama accounting therefore includes startup, model loading, warmups, measured repetitions, and teardown; it does not change latency or TTFT semantics. These values are not CPU utilization, per-request cost, system-wide or exclusive memory, energy, contention, or a basis for cross-host comparability. In-process `localFake` runs have no equivalent helper observation, and historical evidence-v1 bundles without resources remain verifiable.
 
 The first cloud milestone may later extend this path to one single-GPU vLLM experiment, but AWS and vLLM execution remain intentionally unimplemented.
 
