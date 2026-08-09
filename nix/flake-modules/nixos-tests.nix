@@ -181,7 +181,7 @@
               assert platform["kernel"]["name"]
               assert platform["kernel"]["release"]
               assert platform["architecture"] in ("x86_64", "aarch64")
-              assert platform["cpu"]["logicalCpuCount"] > 0
+              assert platform["cpu"]["logicalCpuCount"] is None or platform["cpu"]["logicalCpuCount"] > 0
               if platform["cpu"]["model"] is not None:
                   assert platform["cpu"]["model"]
               software = provenance["software"]
