@@ -10,12 +10,14 @@ use benchplane_schema::{
 };
 use std::{
     fs::File,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
 };
 
 const MAX_OS_RELEASE_BYTES: u64 = 16 * 1024;
-const MAX_CPUINFO_BYTES: u64 = 256 * 1024;
+// Preserve the former inspection range as a prefix without making discovery
+// depend on the size of the complete per-CPU file.
+const MAX_CPUINFO_SCAN_BYTES: u64 = 256 * 1024;
 const MAX_KERNEL_FILE_BYTES: u64 = 4 * 1024;
 const MAX_PLATFORM_VALUE_BYTES: usize = 256;
 const MAX_NIX_STORE_PATH_BYTES: usize = 512;
@@ -74,9 +76,7 @@ pub(crate) fn capture(run_id: &str, plan: &ResolvedExperiment) -> AttemptProvena
         Path::new("/proc/sys/kernel/osrelease"),
         MAX_KERNEL_FILE_BYTES,
     );
-    let cpu_model = read_bounded(Path::new("/proc/cpuinfo"), MAX_CPUINFO_BYTES)
-        .as_deref()
-        .and_then(cpu_model_value);
+    let cpu_model = read_cpu_model(Path::new("/proc/cpuinfo"));
     let logical_cpu_count = std::thread::available_parallelism()
         .ok()
         .and_then(|count| u32::try_from(count.get()).ok());
@@ -148,18 +148,34 @@ fn os_release_identity(contents: &str) -> (Option<String>, Option<String>) {
     )
 }
 
-fn cpu_model_value(contents: &str) -> Option<String> {
-    for accepted_key in ["model name", "Processor", "Hardware"] {
-        if let Some(value) = contents.lines().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            (key.trim() == accepted_key)
-                .then(|| bounded_value(value))
-                .flatten()
-        }) {
-            return Some(value);
+fn read_cpu_model(path: &Path) -> Option<String> {
+    cpu_model_from_reader(File::open(path).ok()?)
+}
+
+fn cpu_model_from_reader(reader: impl Read) -> Option<String> {
+    let mut reader = BufReader::new(reader.take(MAX_CPUINFO_SCAN_BYTES + 1));
+    let mut line = Vec::new();
+    let mut scanned_bytes = 0_u64;
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line).ok()?;
+        if read == 0 {
+            return None;
+        }
+        scanned_bytes = scanned_bytes.checked_add(read as u64)?;
+        if scanned_bytes > MAX_CPUINFO_SCAN_BYTES {
+            return None;
+        }
+        let Ok(line) = std::str::from_utf8(&line) else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if ["model name", "Processor", "Hardware"].contains(&key.trim()) {
+            return bounded_value(value);
         }
     }
-    None
 }
 
 fn bounded_value(value: &str) -> Option<String> {
@@ -205,6 +221,20 @@ fn nix_store_object(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Error};
+
+    struct ErrorAfterChunk(Cursor<Vec<u8>>);
+
+    impl Read for ErrorAfterChunk {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.0.read(buffer)?;
+            if read == 0 {
+                Err(Error::other("trailing read was attempted"))
+            } else {
+                Ok(read)
+            }
+        }
+    }
 
     #[test]
     fn os_release_capture_is_explicitly_allowlisted_and_bounded() {
@@ -218,10 +248,55 @@ mod tests {
     }
 
     #[test]
-    fn cpu_capture_ignores_serial_and_uses_a_model_class_field() {
-        let cpuinfo = "processor : 0\nSerial : secret-serial\nmodel name : Example CPU 1\n";
-        assert_eq!(cpu_model_value(cpuinfo).as_deref(), Some("Example CPU 1"));
-        assert!(cpu_model_value("Serial : secret-serial\n").is_none());
+    fn cpu_scan_recognizes_existing_keys_and_stops_at_the_first_match() {
+        for key in ["model name", "Processor", "Hardware"] {
+            let input = format!("{key} : Example CPU\n").into_bytes();
+            assert_eq!(
+                cpu_model_from_reader(ErrorAfterChunk(Cursor::new(input))).as_deref(),
+                Some("Example CPU")
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_scan_finds_an_early_model_in_input_larger_than_the_old_limit() {
+        let mut input = b"processor : 0\nmodel name : Large Host CPU\n".to_vec();
+        input.resize(256 * 1024 + 1, b'x');
+        assert_eq!(
+            cpu_model_from_reader(Cursor::new(input)).as_deref(),
+            Some("Large Host CPU")
+        );
+    }
+
+    #[test]
+    fn cpu_scan_returns_none_without_an_accepted_field() {
+        let input = b"processor : 0\nSerial : secret-serial\nflags : private details\n";
+        assert!(cpu_model_from_reader(Cursor::new(input)).is_none());
+    }
+
+    #[test]
+    fn cpu_scan_does_not_search_past_the_prefix_bound() {
+        let mut input = vec![b'x'; MAX_CPUINFO_SCAN_BYTES as usize + 1];
+        input.extend_from_slice(b"\nmodel name : Too Late CPU\n");
+        assert!(cpu_model_from_reader(Cursor::new(input)).is_none());
+    }
+
+    #[test]
+    fn cpu_scan_preserves_the_model_value_bound() {
+        let input = format!(
+            "model name : {}\n",
+            "x".repeat(MAX_PLATFORM_VALUE_BYTES + 1)
+        );
+        assert!(cpu_model_from_reader(Cursor::new(input)).is_none());
+    }
+
+    #[test]
+    fn cpu_scan_skips_malformed_and_non_utf8_lines_without_panicking() {
+        let input = b"unexpected line\nmodel name without colon\ninvalid: \xff\xfe\nHardware : Example ARM CPU\n";
+        assert_eq!(
+            cpu_model_from_reader(Cursor::new(input)).as_deref(),
+            Some("Example ARM CPU")
+        );
     }
 
     #[test]
