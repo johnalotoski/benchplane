@@ -22,7 +22,8 @@ local-smoke:
       cargo run --quiet -p benchplane -- run experiments/smoke/local-fake.yaml \
         --output-root "$smoke_dir/output" --json > "$smoke_dir/result.json"; \
       bundle="$(jq -er '.bundlePath' "$smoke_dir/result.json")"; \
-      jq -e '.runState == "succeeded" and .validityStatus == "valid"' \
+      jq -e '.runState == "succeeded" and .validityStatus == "valid" \
+        and .resources == null' \
         "$smoke_dir/result.json" > /dev/null; \
       cargo run --quiet -p benchplane -- evidence verify "$bundle" > /dev/null
 
@@ -32,13 +33,25 @@ cpu-probe-smoke:
       cargo run --quiet -p benchplane -- run experiments/smoke/local-cpu-probe.yaml \
         --output-root "$smoke_dir/output" --json > "$smoke_dir/result.json"; \
       bundle="$(jq -er '.bundlePath' "$smoke_dir/result.json")"; \
-      jq -e '.runState == "succeeded" and .validityStatus == "valid"' \
+      jq -e '.runState == "succeeded" and .validityStatus == "valid" \
+        and (.resources.cpuTimeMicros | type == "number") \
+        and (.resources.peakRssBytes | type == "number") \
+        and (.resources.peakRssBytes % 1024 == 0)' \
         "$smoke_dir/result.json" > /dev/null; \
+      jq -e --arg runId "$(jq -er '.runId' "$smoke_dir/result.json")" \
+        '.format == "benchplane-attempt-resources/v1" \
+          and .runId == $runId and .attemptNumber == 1 \
+          and .scope == "helperProcessLifetime" \
+          and (.cpuTimeMicros | type == "number") \
+          and (.peakRssBytes | type == "number") \
+          and (.peakRssBytes % 1024 == 0)' \
+        "$bundle/attempts/0001/resources.json" > /dev/null; \
       jq -e -s 'length == 4 and all(.generator == "benchplane-cpu-probe/v1") \
         and all(.latencyMicros > 0 and .timeToFirstTokenMicros > 0 \
           and .timeToFirstTokenMicros <= .latencyMicros \
           and .throughputMilliRequestsPerSecond > 0)' \
         "$bundle/attempts/0001/measurements.jsonl" > /dev/null; \
+      grep -F '  attempts/0001/resources.json' "$bundle/SHA256SUMS" > /dev/null; \
       cargo run --quiet -p benchplane -- evidence verify "$bundle" > /dev/null
 
 llama-cpp-smoke:

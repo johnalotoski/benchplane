@@ -250,7 +250,8 @@
             --output-root "$outputRoot" --json > result.json
           bundle="$(${pkgs.jq}/bin/jq -er '.bundlePath' result.json)"
           ${pkgs.jq}/bin/jq -e \
-            '.runState == "succeeded" and .validityStatus == "valid"' \
+            '.runState == "succeeded" and .validityStatus == "valid" and
+             .resources == null' \
             result.json > /dev/null
           ${pkgs.jq}/bin/jq -e \
             --arg runId "$(${pkgs.jq}/bin/jq -er '.runId' result.json)" \
@@ -268,6 +269,7 @@
              .software.runtime.generator == "benchplane-local-fake/v1"' \
             "$bundle/attempts/0001/provenance.json" > /dev/null
           grep -F '  attempts/0001/provenance.json' "$bundle/SHA256SUMS" > /dev/null
+          test ! -e "$bundle/attempts/0001/resources.json"
           test -d "$bundle"
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
           mkdir $out
@@ -280,7 +282,10 @@
             --output-root "$outputRoot" --json > result.json
           bundle="$(${pkgs.jq}/bin/jq -er '.bundlePath' result.json)"
           ${pkgs.jq}/bin/jq -e \
-            '.runState == "succeeded" and .validityStatus == "valid"' \
+            '.runState == "succeeded" and .validityStatus == "valid" and
+             (.resources.cpuTimeMicros | type == "number") and
+             (.resources.peakRssBytes | type == "number") and
+             (.resources.peakRssBytes % 1024 == 0)' \
             result.json > /dev/null
           ${pkgs.jq}/bin/jq -e -s \
             'length == 4 and all(.generator == "benchplane-cpu-probe/v1")' \
@@ -301,6 +306,16 @@
              .software.runtime.generator == "benchplane-cpu-probe/v1"' \
             "$bundle/attempts/0001/provenance.json" > /dev/null
           grep -F '  attempts/0001/provenance.json' "$bundle/SHA256SUMS" > /dev/null
+          ${pkgs.jq}/bin/jq -e \
+            --arg runId "$(${pkgs.jq}/bin/jq -er '.runId' result.json)" \
+            '.format == "benchplane-attempt-resources/v1" and
+             .runId == $runId and .attemptNumber == 1 and
+             .scope == "helperProcessLifetime" and
+             (.cpuTimeMicros | type == "number") and
+             (.peakRssBytes | type == "number") and
+             (.peakRssBytes % 1024 == 0)' \
+            "$bundle/attempts/0001/resources.json" > /dev/null
+          grep -F '  attempts/0001/resources.json' "$bundle/SHA256SUMS" > /dev/null
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
           mkdir $out
           cp result.json verified.txt $out/
@@ -377,7 +392,10 @@
           )
           bundle="$(${pkgs.jq}/bin/jq -er '.bundlePath' "$resultFile")"
           ${pkgs.jq}/bin/jq -e \
-            '.runState == "succeeded" and .validityStatus == "valid"' \
+            '.runState == "succeeded" and .validityStatus == "valid" and
+             (.resources.cpuTimeMicros | type == "number") and
+             (.resources.peakRssBytes | type == "number") and
+             (.resources.peakRssBytes % 1024 == 0)' \
             "$resultFile" > /dev/null
           ${pkgs.jq}/bin/jq -e -s \
             'length == 4 and all(.generator == "benchplane-llama-cpp-smollm2/v1") and all(.latencyMicros > 0 and .timeToFirstTokenMicros > 0 and .timeToFirstTokenMicros <= .latencyMicros and .throughputMilliRequestsPerSecond > 0 and .successfulRequests == 2 and .failedRequests == 0)' \
@@ -409,6 +427,16 @@
              .software.runtime.backend.nixStorePath == $llamaStore' \
             "$bundle/attempts/0001/provenance.json" > /dev/null
           grep -F '  attempts/0001/provenance.json' "$bundle/SHA256SUMS" > /dev/null
+          ${pkgs.jq}/bin/jq -e \
+            --arg runId "$(${pkgs.jq}/bin/jq -er '.runId' "$resultFile")" \
+            '.format == "benchplane-attempt-resources/v1" and
+             .runId == $runId and .attemptNumber == 1 and
+             .scope == "helperProcessLifetime" and
+             (.cpuTimeMicros | type == "number") and
+             (.peakRssBytes | type == "number") and
+             (.peakRssBytes % 1024 == 0)' \
+            "$bundle/attempts/0001/resources.json" > /dev/null
+          grep -F '  attempts/0001/resources.json' "$bundle/SHA256SUMS" > /dev/null
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
           mkdir $out
           cp "$resultFile" $out/result.json

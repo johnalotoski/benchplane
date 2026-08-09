@@ -5,9 +5,11 @@
 //! This is intentionally not a general command runner: callers supply an already fixed
 //! executable and a complete, bounded `MeasurementRecord` protocol.
 
-use benchplane_schema::{FailureRecord, MeasurementRecord};
+use benchplane_schema::{FailureRecord, MeasurementRecord, ProcessResources};
 use std::{
     io::Read,
+    mem::MaybeUninit,
+    os::unix::process::ExitStatusExt,
     process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread,
@@ -36,7 +38,35 @@ pub(crate) struct ChildProtocol {
     pub exit_failure_code: &'static str,
     pub output_failure_code: &'static str,
     pub deadline_failure_code: &'static str,
+    pub resource_failure_code: &'static str,
     pub special_exit_codes: &'static [ExitCodeFailure],
+}
+
+#[derive(Debug)]
+pub(crate) struct ChildExecution {
+    pub measurements: Vec<MeasurementRecord>,
+    pub resources: Option<ProcessResources>,
+    pub failure: Option<FailureRecord>,
+}
+
+impl ChildExecution {
+    pub(crate) fn failed(failure: FailureRecord, resources: Option<ProcessResources>) -> Self {
+        Self {
+            measurements: Vec::new(),
+            resources,
+            failure: Some(failure),
+        }
+    }
+}
+
+struct ReapedChild {
+    status: ExitStatus,
+    resources: Result<ProcessResources, String>,
+}
+
+struct SupervisionFailure {
+    failure: FailureRecord,
+    resources: Option<Result<ProcessResources, String>>,
 }
 
 enum StdoutEvent {
@@ -49,27 +79,37 @@ pub(crate) fn execute(
     mut command: Command,
     protocol: ChildProtocol,
     validate: impl Fn(&MeasurementRecord, usize) -> Result<(), String>,
-) -> Result<Vec<MeasurementRecord>, FailureRecord> {
+) -> ChildExecution {
     let accepted_bytes = protocol
         .expected_records
         .checked_mul(protocol.max_record_bytes)
         .filter(|bytes| *bytes <= protocol.max_stdout_bytes)
-        .ok_or_else(|| output_failure(protocol, "requested output exceeds its transport bound"))?;
+        .ok_or_else(|| output_failure(protocol, "requested output exceeds its transport bound"));
+    let accepted_bytes = match accepted_bytes {
+        Ok(bytes) => bytes,
+        Err(failure) => return ChildExecution::failed(failure, None),
+    };
     debug_assert!(accepted_bytes <= protocol.max_stdout_bytes);
 
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| {
-        failure(
-            protocol.spawn_failure_code,
-            format!(
-                "could not start packaged {} helper: {error}",
-                protocol.runtime_name
-            ),
-        )
-    })?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return ChildExecution::failed(
+                failure(
+                    protocol.spawn_failure_code,
+                    format!(
+                        "could not start packaged {} helper: {error}",
+                        protocol.runtime_name
+                    ),
+                ),
+                None,
+            );
+        }
+    };
     let stdout = child.stdout.take().expect("piped child stdout");
     let stderr = child.stderr.take().expect("piped child stderr");
     let (stdout_tx, stdout_rx) = mpsc::channel();
@@ -78,30 +118,25 @@ pub(crate) fn execute(
     let stderr_thread = thread::spawn(move || read_stderr(stderr));
     let deadline = Instant::now() + Duration::from_secs(protocol.maximum_runtime_seconds);
 
-    let result = supervise(&mut child, &stdout_rx, protocol, deadline, validate);
-    if result.is_err() {
-        terminate_and_reap(&mut child);
-    }
+    let result = supervise(&child, &stdout_rx, protocol, deadline, validate);
+    let result = match result {
+        Ok(completed) => Ok(completed),
+        Err(failure) => Err((
+            failure.failure,
+            failure
+                .resources
+                .unwrap_or_else(|| terminate_and_reap(&mut child)),
+        )),
+    };
     let _ = stdout_thread.join();
     let stderr = stderr_thread.join().unwrap_or_default();
 
     match result {
-        Ok((status, measurements)) if status.success() => {
-            if measurements.len() == protocol.expected_records {
-                Ok(measurements)
-            } else {
-                Err(output_failure(
-                    protocol,
-                    format!(
-                        "emitted {} records; expected {}",
-                        measurements.len(),
-                        protocol.expected_records
-                    ),
-                ))
-            }
+        Ok((reaped, measurements)) if reaped.status.success() => {
+            completed_success(protocol, reaped.resources, measurements)
         }
-        Ok((status, _)) => {
-            let special = status.code().and_then(|code| {
+        Ok((reaped, _)) => {
+            let special = reaped.status.code().and_then(|code| {
                 protocol
                     .special_exit_codes
                     .iter()
@@ -113,33 +148,61 @@ pub(crate) fn execute(
                     (
                         protocol.exit_failure_code,
                         format!(
-                            "packaged {} helper exited with {status}",
-                            protocol.runtime_name
+                            "packaged {} helper exited with {}",
+                            protocol.runtime_name, reaped.status
                         ),
                     )
                 });
-            Err(failure(
-                code,
-                format!("{message}{}", format_stderr(&stderr)),
-            ))
+            failed_after_reap(
+                failure(code, format!("{message}{}", format_stderr(&stderr))),
+                reaped.resources,
+            )
         }
-        Err(mut failure) => {
+        Err((mut failure, resources)) => {
             if !stderr.is_empty() && failure.code != protocol.deadline_failure_code {
                 failure.message.push_str(&format_stderr(&stderr));
                 failure.message = bounded_message(&failure.message);
             }
-            Err(failure)
+            failed_after_reap(failure, resources)
         }
     }
 }
 
+fn completed_success(
+    protocol: ChildProtocol,
+    resources: Result<ProcessResources, String>,
+    measurements: Vec<MeasurementRecord>,
+) -> ChildExecution {
+    if measurements.len() != protocol.expected_records {
+        return failed_after_reap(
+            output_failure(
+                protocol,
+                format!(
+                    "emitted {} records; expected {}",
+                    measurements.len(),
+                    protocol.expected_records
+                ),
+            ),
+            resources,
+        );
+    }
+    match resources {
+        Ok(resources) => ChildExecution {
+            measurements,
+            resources: Some(resources),
+            failure: None,
+        },
+        Err(error) => ChildExecution::failed(resource_failure(protocol, error), None),
+    }
+}
+
 fn supervise(
-    child: &mut Child,
+    child: &Child,
     stdout: &Receiver<StdoutEvent>,
     protocol: ChildProtocol,
     deadline: Instant,
     validate: impl Fn(&MeasurementRecord, usize) -> Result<(), String>,
-) -> Result<(ExitStatus, Vec<MeasurementRecord>), FailureRecord> {
+) -> Result<(ReapedChild, Vec<MeasurementRecord>), SupervisionFailure> {
     let mut measurements = Vec::with_capacity(protocol.expected_records);
     let mut stdout_done = false;
     let mut exit_status = None;
@@ -147,22 +210,24 @@ fn supervise(
     while !stdout_done || exit_status.is_none() {
         let now = Instant::now();
         if now >= deadline {
-            terminate_and_reap(child);
-            return Err(failure(
-                protocol.deadline_failure_code,
-                format!(
-                    "packaged {} helper exceeded the {} second experiment deadline",
-                    protocol.runtime_name, protocol.maximum_runtime_seconds
+            return Err(supervision_failure(
+                failure(
+                    protocol.deadline_failure_code,
+                    format!(
+                        "packaged {} helper exceeded the {} second experiment deadline",
+                        protocol.runtime_name, protocol.maximum_runtime_seconds
+                    ),
                 ),
+                &mut exit_status,
             ));
         }
         let wait = POLL_INTERVAL.min(deadline.saturating_duration_since(now));
         match stdout.recv_timeout(wait) {
             Ok(StdoutEvent::Line(line)) => {
                 if measurements.len() >= protocol.expected_records {
-                    return Err(output_failure(
-                        protocol,
-                        "emitted excessive measurement records",
+                    return Err(supervision_failure(
+                        output_failure(protocol, "emitted excessive measurement records"),
+                        &mut exit_status,
                     ));
                 }
                 if line
@@ -170,33 +235,67 @@ fn supervise(
                     .checked_add(1)
                     .is_none_or(|bytes| bytes > protocol.max_record_bytes)
                 {
-                    return Err(output_failure(
-                        protocol,
-                        format!(
-                            "measurement record exceeded the {} byte protocol envelope",
-                            protocol.max_record_bytes
+                    return Err(supervision_failure(
+                        output_failure(
+                            protocol,
+                            format!(
+                                "measurement record exceeded the {} byte protocol envelope",
+                                protocol.max_record_bytes
+                            ),
                         ),
+                        &mut exit_status,
                     ));
                 }
-                let record: MeasurementRecord = serde_json::from_slice(&line).map_err(|error| {
-                    output_failure(protocol, format!("emitted malformed JSON: {error}"))
-                })?;
-                validate(&record, measurements.len())
-                    .map_err(|message| output_failure(protocol, message))?;
+                let record: MeasurementRecord = match serde_json::from_slice(&line) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        return Err(supervision_failure(
+                            output_failure(protocol, format!("emitted malformed JSON: {error}")),
+                            &mut exit_status,
+                        ));
+                    }
+                };
+                if let Err(message) = validate(&record, measurements.len()) {
+                    return Err(supervision_failure(
+                        output_failure(protocol, message),
+                        &mut exit_status,
+                    ));
+                }
                 measurements.push(record);
             }
-            Ok(StdoutEvent::Error(message)) => return Err(output_failure(protocol, message)),
+            Ok(StdoutEvent::Error(message)) => {
+                return Err(supervision_failure(
+                    output_failure(protocol, message),
+                    &mut exit_status,
+                ));
+            }
             Ok(StdoutEvent::Done) | Err(RecvTimeoutError::Disconnected) => stdout_done = true,
             Err(RecvTimeoutError::Timeout) => {}
         }
         if exit_status.is_none() {
-            exit_status = child.try_wait().map_err(|error| {
-                output_failure(protocol, format!("could not wait for helper: {error}"))
-            })?;
+            exit_status = match wait4(child, libc::WNOHANG) {
+                Ok(status) => status,
+                Err(error) => {
+                    return Err(supervision_failure(
+                        output_failure(protocol, format!("could not wait for helper: {error}")),
+                        &mut exit_status,
+                    ));
+                }
+            };
         }
     }
 
     Ok((exit_status.expect("child exit observed"), measurements))
+}
+
+fn supervision_failure(
+    failure: FailureRecord,
+    reaped: &mut Option<ReapedChild>,
+) -> SupervisionFailure {
+    SupervisionFailure {
+        failure,
+        resources: reaped.take().map(|reaped| reaped.resources),
+    }
 }
 
 fn read_stdout(mut reader: impl Read, sender: Sender<StdoutEvent>, protocol: ChildProtocol) {
@@ -261,11 +360,96 @@ fn read_stderr(mut reader: impl Read) -> Vec<u8> {
     retained
 }
 
-fn terminate_and_reap(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
+fn terminate_and_reap(child: &mut Child) -> Result<ProcessResources, String> {
+    match wait4(child, libc::WNOHANG) {
+        Ok(Some(reaped)) => return reaped.resources,
+        Ok(None) => {}
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
     }
-    let _ = child.wait();
+    let _ = child.kill();
+    match wait4(child, 0) {
+        Ok(Some(reaped)) => reaped.resources,
+        Ok(None) => Err("blocking wait returned without reaping the helper".to_owned()),
+        Err(error) => {
+            let _ = child.wait();
+            Err(error)
+        }
+    }
+}
+
+fn wait4(child: &Child, options: libc::c_int) -> Result<Option<ReapedChild>, String> {
+    let pid = libc::pid_t::try_from(child.id())
+        .map_err(|_| "helper process ID is not representable".to_owned())?;
+    loop {
+        let mut status = 0;
+        let mut usage = MaybeUninit::<libc::rusage>::uninit();
+        // SAFETY: `pid` identifies the exact child owned by `child`; both output
+        // pointers are valid for writes, and successful return initializes rusage.
+        let waited = unsafe { libc::wait4(pid, &mut status, options, usage.as_mut_ptr()) };
+        if waited == pid {
+            // SAFETY: wait4 returned this child PID and therefore initialized rusage.
+            let usage = unsafe { usage.assume_init() };
+            return Ok(Some(ReapedChild {
+                status: ExitStatus::from_raw(status),
+                resources: convert_resource_usage(&usage),
+            }));
+        }
+        if waited == 0 {
+            return Ok(None);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(error.to_string());
+    }
+}
+
+fn convert_resource_usage(usage: &libc::rusage) -> Result<ProcessResources, String> {
+    resource_usage_from_components(
+        usage.ru_utime.tv_sec,
+        usage.ru_utime.tv_usec,
+        usage.ru_stime.tv_sec,
+        usage.ru_stime.tv_usec,
+        usage.ru_maxrss,
+    )
+}
+
+fn resource_usage_from_components(
+    user_seconds: i64,
+    user_micros: i64,
+    system_seconds: i64,
+    system_micros: i64,
+    peak_rss_kib: i64,
+) -> Result<ProcessResources, String> {
+    let time_micros = |seconds: i64, micros: i64| {
+        if seconds < 0 || !(0..1_000_000).contains(&micros) {
+            return None;
+        }
+        u64::try_from(seconds)
+            .ok()?
+            .checked_mul(1_000_000)?
+            .checked_add(u64::try_from(micros).ok()?)
+    };
+    let user = time_micros(user_seconds, user_micros)
+        .ok_or_else(|| "helper user CPU time is not representable".to_owned())?;
+    let system = time_micros(system_seconds, system_micros)
+        .ok_or_else(|| "helper system CPU time is not representable".to_owned())?;
+    let cpu_time_micros = user
+        .checked_add(system)
+        .ok_or_else(|| "helper total CPU time overflowed".to_owned())?;
+    let peak_rss_bytes = u64::try_from(peak_rss_kib)
+        .ok()
+        .and_then(|value| value.checked_mul(1024))
+        .ok_or_else(|| "helper peak RSS is not representable in bytes".to_owned())?;
+    Ok(ProcessResources {
+        cpu_time_micros,
+        peak_rss_bytes,
+    })
 }
 
 fn output_failure(protocol: ChildProtocol, message: impl AsRef<str>) -> FailureRecord {
@@ -273,6 +457,24 @@ fn output_failure(protocol: ChildProtocol, message: impl AsRef<str>) -> FailureR
         protocol.output_failure_code,
         format!("{} protocol: {}", protocol.runtime_name, message.as_ref()),
     )
+}
+
+fn resource_failure(protocol: ChildProtocol, message: impl AsRef<str>) -> FailureRecord {
+    failure(
+        protocol.resource_failure_code,
+        format!(
+            "could not account for packaged {} helper: {}",
+            protocol.runtime_name,
+            message.as_ref()
+        ),
+    )
+}
+
+fn failed_after_reap(
+    primary: FailureRecord,
+    resources: Result<ProcessResources, String>,
+) -> ChildExecution {
+    ChildExecution::failed(primary, resources.ok())
 }
 
 fn failure(code: &str, message: impl AsRef<str>) -> FailureRecord {
@@ -294,5 +496,116 @@ fn format_stderr(stderr: &[u8]) -> String {
         String::new()
     } else {
         format!("; stderr: {}", String::from_utf8_lossy(stderr).trim())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_PROTOCOL: ChildProtocol = ChildProtocol {
+        runtime_name: "test",
+        expected_records: 0,
+        max_record_bytes: 1,
+        max_stdout_bytes: 1,
+        maximum_runtime_seconds: 1,
+        spawn_failure_code: "test.spawnFailed",
+        exit_failure_code: "test.exitFailed",
+        output_failure_code: "test.outputInvalid",
+        deadline_failure_code: "test.deadlineExceeded",
+        resource_failure_code: "test.resourceAccountingFailed",
+        special_exit_codes: &[],
+    };
+
+    #[test]
+    fn converts_linux_wait4_units_with_checked_arithmetic() {
+        assert_eq!(
+            resource_usage_from_components(1, 250_000, 2, 750_000, 4096)
+                .expect("valid resource usage"),
+            ProcessResources {
+                cpu_time_micros: 4_000_000,
+                peak_rss_bytes: 4 * 1024 * 1024,
+            }
+        );
+        for invalid in [
+            resource_usage_from_components(-1, 0, 0, 0, 1),
+            resource_usage_from_components(0, 1_000_000, 0, 0, 1),
+            resource_usage_from_components(i64::MAX, 0, 0, 0, 1),
+            resource_usage_from_components(0, 0, 0, 0, -1),
+            resource_usage_from_components(0, 0, 0, 0, i64::MAX),
+        ] {
+            assert!(invalid.is_err());
+        }
+    }
+
+    #[test]
+    fn accounting_failure_does_not_mask_an_established_primary_failure() {
+        let primary = failure("helper.primaryFailure", "primary failure");
+        let outcome = failed_after_reap(
+            primary.clone(),
+            Err("injected accounting failure".to_owned()),
+        );
+        assert_eq!(outcome.failure, Some(primary));
+        assert!(outcome.resources.is_none());
+        assert!(outcome.measurements.is_empty());
+    }
+
+    #[test]
+    fn otherwise_successful_child_requires_real_accounting_without_fabricated_zeroes() {
+        let outcome = completed_success(
+            TEST_PROTOCOL,
+            Err("injected accounting failure".to_owned()),
+            Vec::new(),
+        );
+        assert_eq!(
+            outcome.failure.expect("accounting failure").code,
+            TEST_PROTOCOL.resource_failure_code
+        );
+        assert!(outcome.resources.is_none());
+        assert!(outcome.measurements.is_empty());
+    }
+
+    #[test]
+    fn protocol_failure_retains_resources_if_the_child_was_already_reaped() {
+        let expected = ProcessResources {
+            cpu_time_micros: 17,
+            peak_rss_bytes: 2048,
+        };
+        let mut reaped = Some(ReapedChild {
+            status: ExitStatus::from_raw(0),
+            resources: Ok(expected),
+        });
+        let observed = supervision_failure(
+            failure("helper.outputInvalid", "trailing malformed output"),
+            &mut reaped,
+        );
+        assert_eq!(
+            observed.resources.expect("retained resources"),
+            Ok(expected)
+        );
+        assert!(reaped.is_none());
+    }
+
+    #[test]
+    fn termination_reaps_the_exact_child_and_returns_resources() {
+        let mut child = Command::new("sleep")
+            .arg("5")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test child");
+        let pid = libc::pid_t::try_from(child.id()).expect("representable PID");
+        let resources = terminate_and_reap(&mut child).expect("reap with accounting");
+        assert!(resources.peak_rss_bytes.is_multiple_of(1024));
+
+        let mut status = 0;
+        // SAFETY: this probes only the PID already reaped above, with a valid status pointer.
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(waited, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 }

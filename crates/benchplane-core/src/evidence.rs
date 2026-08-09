@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use benchplane_schema::{
-    AttemptProvenance, AttemptRecord, AttemptStatus, DeviceClass, EvidenceManifest, LifecycleEvent,
-    RunRecord, RunState, RunSummary, RuntimeProvenance, ValidityResult,
-    ATTEMPT_PROVENANCE_FORMAT_V1, BENCHPLANE_SOFTWARE_NAME, CPU_PROBE_GENERATOR_VERSION,
-    EVIDENCE_FORMAT_V1, LLAMA_CPP_BACKEND_IDENTITY, LLAMA_CPP_ENGINE_NAME,
-    LLAMA_CPP_ENGINE_VERSION, LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_MODEL_IDENTITY,
-    LLAMA_CPP_MODEL_SHA256, LOCAL_FAKE_GENERATOR_VERSION,
+    AttemptProvenance, AttemptRecord, AttemptResources, AttemptStatus, DeviceClass,
+    EvidenceManifest, LifecycleEvent, RunRecord, RunState, RunSummary, RuntimeProvenance,
+    ValidityResult, ATTEMPT_PROVENANCE_FORMAT_V1, ATTEMPT_RESOURCES_FORMAT_V1,
+    BENCHPLANE_SOFTWARE_NAME, CPU_PROBE_GENERATOR_VERSION, EVIDENCE_FORMAT_V1,
+    LLAMA_CPP_BACKEND_IDENTITY, LLAMA_CPP_ENGINE_NAME, LLAMA_CPP_ENGINE_VERSION,
+    LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_MODEL_IDENTITY, LLAMA_CPP_MODEL_SHA256,
+    LOCAL_FAKE_GENERATOR_VERSION,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -23,6 +24,7 @@ const MAX_CHECKSUM_ENTRIES: usize = 10_000;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_IDENTITY_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_ATTEMPT_PROVENANCE_BYTES: u64 = 16 * 1024;
+const MAX_ATTEMPT_RESOURCES_BYTES: u64 = 4 * 1024;
 const MAX_PROVENANCE_VALUE_BYTES: usize = 256;
 const MAX_NIX_STORE_PATH_BYTES: usize = 512;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -104,6 +106,8 @@ pub enum EvidenceError {
     InconsistentRecord(String),
     #[error("invalid attempt provenance: {0}")]
     InvalidAttemptProvenance(String),
+    #[error("invalid attempt resources: {0}")]
+    InvalidAttemptResources(String),
 }
 
 pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceError> {
@@ -458,6 +462,7 @@ fn retained_limit(relative: &str) -> Option<u64> {
         | "summary.json"
         | "events.jsonl" => Some(MAX_IDENTITY_RECORD_BYTES),
         "attempts/0001/provenance.json" => Some(MAX_ATTEMPT_PROVENANCE_BYTES),
+        "attempts/0001/resources.json" => Some(MAX_ATTEMPT_RESOURCES_BYTES),
         _ => None,
     }
 }
@@ -562,6 +567,14 @@ fn validate_record_consistency(
             })?;
         validate_attempt_provenance(&provenance, manifest)?;
     }
+    if let Some(bytes) = records.get("attempts/0001/resources.json") {
+        let resources: AttemptResources =
+            serde_json::from_slice(bytes).map_err(|source| EvidenceError::InvalidRecord {
+                path: "attempts/0001/resources.json".to_owned(),
+                source,
+            })?;
+        validate_attempt_resources(&resources, manifest)?;
+    }
     let validity: ValidityResult = parse_record(records, "validity.json")?;
     if validity.run_id != manifest.run_id || validity.status != manifest.validity_status {
         return Err(EvidenceError::InconsistentRecord(
@@ -594,6 +607,22 @@ fn validate_record_consistency(
         if event.run_id != manifest.run_id || event.attempt_number != 1 {
             return Err(EvidenceError::InconsistentRecord("events.jsonl".to_owned()));
         }
+    }
+    Ok(())
+}
+
+fn validate_attempt_resources(
+    resources: &AttemptResources,
+    manifest: &EvidenceManifest,
+) -> Result<(), EvidenceError> {
+    if resources.format != ATTEMPT_RESOURCES_FORMAT_V1 {
+        return invalid_resources("unsupported format");
+    }
+    if resources.run_id != manifest.run_id || resources.attempt_number != 1 {
+        return invalid_resources("runId or attemptNumber does not match the bundle");
+    }
+    if !resources.peak_rss_bytes.is_multiple_of(1024) {
+        return invalid_resources("peakRssBytes is not an exact Linux KiB-to-byte conversion");
     }
     Ok(())
 }
@@ -751,6 +780,10 @@ fn optional_nix_store_path(value: Option<&str>, field: &'static str) -> Result<(
 
 fn invalid_provenance<T>(message: &str) -> Result<T, EvidenceError> {
     Err(EvidenceError::InvalidAttemptProvenance(message.to_owned()))
+}
+
+fn invalid_resources<T>(message: &str) -> Result<T, EvidenceError> {
+    Err(EvidenceError::InvalidAttemptResources(message.to_owned()))
 }
 
 fn is_run_id(value: &str) -> bool {
@@ -914,6 +947,26 @@ mod tests {
         .expect("write provenance");
     }
 
+    fn valid_resources() -> AttemptResources {
+        serde_json::from_value(serde_json::json!({
+            "format": ATTEMPT_RESOURCES_FORMAT_V1,
+            "runId": "run-018f6f9a-7b3c-7abc-8def-0123456789ab",
+            "attemptNumber": 1,
+            "scope": "helperProcessLifetime",
+            "cpuTimeMicros": 12345,
+            "peakRssBytes": 4194304
+        }))
+        .expect("construct valid attempt resources")
+    }
+
+    fn write_resources(root: &Path, resources: &AttemptResources) {
+        fs::write(
+            root.join("attempts/0001/resources.json"),
+            serde_json::to_vec_pretty(resources).expect("serialize resources"),
+        )
+        .expect("write resources");
+    }
+
     #[test]
     fn verifies_the_checked_in_fixture() {
         let manifest = verify_evidence_bundle(&fixture_root()).expect("fixture should verify");
@@ -983,6 +1036,103 @@ mod tests {
             verify_evidence_bundle(&directory.path),
             Err(EvidenceError::InconsistentRecord(path))
                 if path.contains("attempts/0001/provenance.json exceeds")
+        ));
+    }
+
+    #[test]
+    fn verifies_optional_attempt_resources_and_checksums_them() {
+        let directory = copy_fixture("attempt-resources");
+        write_resources(&directory.path, &valid_resources());
+        rewrite_checksums(&directory.path);
+
+        verify_evidence_bundle(&directory.path).expect("resource extension should verify");
+        assert!(fs::read_to_string(directory.path.join("SHA256SUMS"))
+            .expect("read checksums")
+            .lines()
+            .any(|line| line.ends_with("  attempts/0001/resources.json")));
+    }
+
+    #[test]
+    fn rejects_tampered_or_inconsistent_attempt_resources() {
+        let tampered = copy_fixture("tampered-attempt-resources");
+        write_resources(&tampered.path, &valid_resources());
+        rewrite_checksums(&tampered.path);
+        fs::write(tampered.path.join("attempts/0001/resources.json"), b"{}\n")
+            .expect("tamper with resources");
+        assert!(matches!(
+            verify_evidence_bundle(&tampered.path),
+            Err(EvidenceError::ChecksumMismatch(path))
+                if path == "attempts/0001/resources.json"
+        ));
+
+        for (label, mutate) in [
+            ("format", 0_u8),
+            ("run-id", 1),
+            ("attempt", 2),
+            ("rss-units", 3),
+        ] {
+            let directory = copy_fixture(&format!("invalid-attempt-resources-{label}"));
+            let mut resources = valid_resources();
+            match mutate {
+                0 => resources.format = "benchplane-attempt-resources/v2".to_owned(),
+                1 => resources.run_id = "run-018f6f9a-7b3c-7abc-8def-0123456789ac".to_owned(),
+                2 => resources.attempt_number = 2,
+                3 => resources.peak_rss_bytes += 1,
+                _ => unreachable!(),
+            }
+            write_resources(&directory.path, &resources);
+            rewrite_checksums(&directory.path);
+            assert!(matches!(
+                verify_evidence_bundle(&directory.path),
+                Err(EvidenceError::InvalidAttemptResources(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_malformed_and_oversized_attempt_resources() {
+        let unknown_scope = copy_fixture("unknown-resource-scope");
+        fs::write(
+            unknown_scope.path.join("attempts/0001/resources.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "format": ATTEMPT_RESOURCES_FORMAT_V1,
+                "runId": "run-018f6f9a-7b3c-7abc-8def-0123456789ab",
+                "attemptNumber": 1,
+                "scope": "systemWide",
+                "cpuTimeMicros": 1,
+                "peakRssBytes": 1024
+            }))
+            .expect("serialize unknown scope"),
+        )
+        .expect("write unknown scope");
+        rewrite_checksums(&unknown_scope.path);
+        assert!(matches!(
+            verify_evidence_bundle(&unknown_scope.path),
+            Err(EvidenceError::InvalidRecord { path, .. })
+                if path == "attempts/0001/resources.json"
+        ));
+
+        let malformed = copy_fixture("malformed-attempt-resources");
+        fs::write(malformed.path.join("attempts/0001/resources.json"), b"{}\n")
+            .expect("write malformed resources");
+        rewrite_checksums(&malformed.path);
+        assert!(matches!(
+            verify_evidence_bundle(&malformed.path),
+            Err(EvidenceError::InvalidRecord { path, .. })
+                if path == "attempts/0001/resources.json"
+        ));
+
+        let oversized = copy_fixture("oversized-attempt-resources");
+        fs::write(
+            oversized.path.join("attempts/0001/resources.json"),
+            vec![b' '; MAX_ATTEMPT_RESOURCES_BYTES as usize + 1],
+        )
+        .expect("write oversized resources");
+        rewrite_checksums(&oversized.path);
+        assert!(matches!(
+            verify_evidence_bundle(&oversized.path),
+            Err(EvidenceError::InconsistentRecord(path))
+                if path.contains("attempts/0001/resources.json exceeds")
         ));
     }
 
