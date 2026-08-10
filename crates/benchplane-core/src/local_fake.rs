@@ -112,6 +112,7 @@ fn measurement(
         ),
         successful_requests: plan.experiment.spec.workload.requests,
         failed_requests: 0,
+        request_observations: Vec::new(),
     }
 }
 

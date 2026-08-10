@@ -212,7 +212,7 @@ fn print_human_result(result: &RunResult) {
     println!("sample count: {}", result.sample_count);
     if let Some(latency) = &result.latency {
         println!(
-            "latency (µs): mean={} p50={} p95={}",
+            "repetition-aggregate latency (µs): mean={} p50={} p95={}",
             latency.mean_micros, latency.p50_micros, latency.p95_micros
         );
     }

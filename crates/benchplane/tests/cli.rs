@@ -412,7 +412,7 @@ fn run_human_output_reports_the_terminal_result() {
         "validity: valid",
         "attempt count: 1",
         "sample count: 3",
-        "latency (µs):",
+        "repetition-aggregate latency (µs):",
         "mean throughput (mreq/s):",
         "bundle path:",
         "experiment digest: sha256:",

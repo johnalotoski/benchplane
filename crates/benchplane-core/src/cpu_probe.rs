@@ -184,6 +184,7 @@ mod tests {
             throughput_milli_requests_per_second: 1000,
             successful_requests: 2,
             failed_requests: 0,
+            request_observations: Vec::new(),
         }
     }
 
@@ -211,6 +212,7 @@ mod tests {
             throughput_milli_requests_per_second: u64::MAX,
             successful_requests: u32::MAX,
             failed_requests: 0,
+            request_observations: Vec::new(),
         };
         let serialized_bytes = serde_json::to_vec(&maximum_record)
             .expect("serialize maximum record")

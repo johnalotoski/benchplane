@@ -8,15 +8,15 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 
 ## Current milestone
 
-Keep the attempt-scoped helper-resource-accounting milestone small and reviewable. Every supported supervised local helper path:
+Keep the llama.cpp request-observation milestone small and reviewable. A successful packaged llama.cpp execution:
 
-1. obtains exact per-child Linux accounting at the private reap boundary, never from a process-global child-usage delta;
-2. records helper-process-lifetime user-plus-system CPU time in microseconds and peak RSS in bytes without attributing either value to requests or repetitions;
-3. retains accounting on nonzero-exit and deadline failures when the exact reap observation is available, while preserving the established primary failure and discarding partial measurement output;
-4. stores the checksum-covered payload at `attempts/0001/resources.json` and verifies its bounded type, format, scope, and attempt/run identity when present; and
-5. leaves resources absent for in-process `localFake` and preserves `benchplane-evidence/v1` compatibility for historical bundles without the additive payload.
+1. retains one bounded latency and TTFT observation for every sequential request in every warmup and measured repetition;
+2. associates each observation with its enclosing attempt, phase, repetition, and one-based request index without retaining prompt or generated text;
+3. preserves the existing repetition aggregates, validity sample population, and repetition-aggregate summary percentiles;
+4. uses the versioned `benchplane-llama-cpp-smollm2/v2` generator contract while the verifier continues to accept legitimate historical aggregate-only v1 evidence; and
+5. requires the complete bounded aggregate-and-observation sequence before committing any helper measurement output.
 
-For llama.cpp the resource scope includes startup, backend/model initialization and loading, warmups, measured repetitions, and teardown. Existing latency/TTFT semantics remain unchanged. This milestone does not measure utilization, system-wide or exclusive memory, energy, contention, GPU resources, or per-request/per-repetition resources; establish statistically reproducible or cross-host-comparable performance; add GPU/vLLM/AWS behavior; or introduce generic telemetry, process, provider, plugin, or controller abstractions. Preserve attempt provenance, package-owned execution, bounded child supervision, lifecycle, validity, and publication contracts.
+The model is loaded once for the helper lifetime, requests execute sequentially at concurrency one, and observations share that initialized state; they are not independent runs. Model loading remains outside request latency/TTFT, while exact helper resources still cover startup, model loading, warmups, measured work, and teardown. This milestone does not add request-distribution summaries, uncertainty, comparison, independent-run orchestration, GPU/vLLM/AWS behavior, or generic telemetry, event, provider, plugin, or controller abstractions. Preserve attempt provenance, helper-resource accounting, package-owned execution, bounded child supervision, lifecycle, validity, and publication contracts.
 
 ## Boundaries
 

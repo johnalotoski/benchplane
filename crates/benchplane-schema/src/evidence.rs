@@ -274,6 +274,14 @@ pub enum MeasurementPhase {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestObservation {
+    pub request_index: u32,
+    pub latency_micros: u64,
+    pub time_to_first_token_micros: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MeasurementRecord {
     pub generator: String,
     pub attempt_number: u32,
@@ -285,6 +293,8 @@ pub struct MeasurementRecord {
     pub throughput_milli_requests_per_second: u64,
     pub successful_requests: u32,
     pub failed_requests: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_observations: Vec<RequestObservation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -354,4 +364,61 @@ pub struct RunResult {
     pub resolved_plan_digest: String,
     pub evidence_digest: String,
     pub failure: Option<FailureRecord>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn aggregate_json() -> serde_json::Value {
+        serde_json::json!({
+            "generator": "benchplane-llama-cpp-smollm2/v1",
+            "attemptNumber": 1,
+            "phase": "measured",
+            "repetitionIndex": 1,
+            "sampleIndex": 1,
+            "latencyMicros": 20,
+            "timeToFirstTokenMicros": 10,
+            "throughputMilliRequestsPerSecond": 1000,
+            "successfulRequests": 2,
+            "failedRequests": 0
+        })
+    }
+
+    #[test]
+    fn historical_measurements_default_to_no_request_observations() {
+        let record: MeasurementRecord =
+            serde_json::from_value(aggregate_json()).expect("historical aggregate record");
+        assert!(record.request_observations.is_empty());
+        assert!(serde_json::to_value(record)
+            .expect("serialize historical shape")
+            .get("requestObservations")
+            .is_none());
+    }
+
+    #[test]
+    fn request_observations_round_trip_as_bounded_numeric_data() {
+        let mut json = aggregate_json();
+        json["generator"] = serde_json::json!("benchplane-llama-cpp-smollm2/v2");
+        json["requestObservations"] = serde_json::json!([
+            {
+                "requestIndex": 1,
+                "latencyMicros": 19,
+                "timeToFirstTokenMicros": 9
+            },
+            {
+                "requestIndex": 2,
+                "latencyMicros": 21,
+                "timeToFirstTokenMicros": 11
+            }
+        ]);
+        let record: MeasurementRecord = serde_json::from_value(json).expect("v2 measurement");
+        assert_eq!(record.request_observations.len(), 2);
+        assert_eq!(record.request_observations[1].request_index, 2);
+        let serialized = serde_json::to_vec(&record).expect("serialize v2 measurement");
+        assert_eq!(
+            serde_json::from_slice::<MeasurementRecord>(&serialized).expect("round trip"),
+            record
+        );
+    }
 }
