@@ -67,24 +67,15 @@ pub(crate) fn summarize(
         if measured.is_empty() || validity.status == ValidityStatus::Indeterminate {
             (None, None)
         } else {
-            let mut latencies: Vec<u64> = measured
+            let latencies: Vec<u64> = measured
                 .iter()
                 .map(|record| record.latency_micros)
                 .collect();
-            latencies.sort_unstable();
-            let latency_sum: u64 = latencies.iter().sum();
-            let throughput_sum: u64 = measured
+            let throughputs: Vec<u64> = measured
                 .iter()
                 .map(|record| record.throughput_milli_requests_per_second)
-                .sum();
-            (
-                Some(LatencySummary {
-                    mean_micros: latency_sum / sample_count as u64,
-                    p50_micros: nearest_rank(&latencies, 50),
-                    p95_micros: nearest_rank(&latencies, 95),
-                }),
-                Some(throughput_sum / sample_count as u64),
-            )
+                .collect();
+            (describe_micros(&latencies), mean_u64(&throughputs))
         };
 
     RunSummary {
@@ -106,7 +97,28 @@ fn measured_records(records: &[MeasurementRecord]) -> impl Iterator<Item = &Meas
         .filter(|record| record.phase == MeasurementPhase::Measured)
 }
 
-fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
+pub(crate) fn describe_micros(values: &[u64]) -> Option<LatencySummary> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    Some(LatencySummary {
+        mean_micros: mean_u64(&sorted)?,
+        p50_micros: nearest_rank(&sorted, 50),
+        p95_micros: nearest_rank(&sorted, 95),
+    })
+}
+
+pub(crate) fn mean_u64(values: &[u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let sum: u128 = values.iter().map(|value| u128::from(*value)).sum();
+    (sum / values.len() as u128).try_into().ok()
+}
+
+pub(crate) fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
     let rank = (percentile * sorted.len()).div_ceil(100);
     sorted[rank.saturating_sub(1)]
 }

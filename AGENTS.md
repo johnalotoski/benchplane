@@ -8,15 +8,15 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 
 ## Current milestone
 
-Keep the llama.cpp request-observation milestone small and reviewable. A successful packaged llama.cpp execution:
+Keep verified two-bundle llama.cpp comparison small and descriptive. `benchplane evidence compare` must:
 
-1. retains one bounded latency and TTFT observation for every sequential request in every warmup and measured repetition;
-2. associates each observation with its enclosing attempt, phase, repetition, and one-based request index without retaining prompt or generated text;
-3. preserves the existing repetition aggregates, validity sample population, and repetition-aggregate summary percentiles;
-4. uses the versioned `benchplane-llama-cpp-smollm2/v2` generator contract while the verifier continues to accept legitimate historical aggregate-only v1 evidence; and
-5. requires the complete bounded aggregate-and-observation sequence before committing any helper measurement output.
+1. pass both inputs through the full bounded semantic evidence verifier before analysis;
+2. accept only successful, valid current local llama.cpp v2 bundles and compare concrete measurement-affecting model/runtime/workload dimensions rather than whole resolved-plan digests;
+3. calculate measured request and repetition statistics from raw non-warmup records, never copied summary numbers;
+4. keep request, repetition, independently initialized run, and whole-helper resource scopes explicit; and
+5. report recorded environment differences as context without claiming that they caused a performance delta.
 
-The model is loaded once for the helper lifetime, requests execute sequentially at concurrency one, and observations share that initialized state; they are not independent runs. Model loading remains outside request latency/TTFT, while exact helper resources still cover startup, model loading, warmups, measured work, and teardown. This milestone does not add request-distribution summaries, uncertainty, comparison, independent-run orchestration, GPU/vLLM/AWS behavior, or generic telemetry, event, provider, plugin, or controller abstractions. Preserve attempt provenance, helper-resource accounting, package-owned execution, bounded child supervision, lifecycle, validity, and publication contracts.
+Use deterministic floor means and the existing nearest-rank percentile convention. Requests and repetitions inside one helper lifetime are not independent runs. Helper CPU time and peak RSS include initialization, model loading, warmups, measured work, and teardown and must never be attributed per request. Historical llama v1 remains verifiable but is not eligible for this first comparison contract. Do not add confidence intervals, significance tests, causal claims, run orchestration/groups, persistent comparison artifacts, generic analytics/equivalence abstractions, GPU/vLLM/AWS execution, or new lifecycle/evidence/experiment versions. Preserve the package-owned execution, supervision, provenance, resources, lifecycle, validity, and atomic publication contracts.
 
 ## Boundaries
 

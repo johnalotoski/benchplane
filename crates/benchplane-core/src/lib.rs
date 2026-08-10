@@ -9,6 +9,7 @@ compile_error!(
 );
 
 mod child_supervisor;
+mod comparison;
 mod cpu_probe;
 pub mod evidence;
 mod execution;
@@ -20,7 +21,11 @@ mod provenance;
 mod resolution;
 mod run;
 
-pub use benchplane_schema::{EvidenceManifest, RunResult};
+pub use benchplane_schema::{
+    EnvironmentRelationship, EvidenceComparison, EvidenceManifest, MetricComparison, RunResult,
+    EVIDENCE_COMPARISON_FORMAT_V1,
+};
+pub use comparison::{compare_evidence_bundles, ComparisonError};
 pub use evidence::{verify_evidence_bundle, EvidenceError};
 pub use lifecycle::{Lifecycle, LifecycleError};
 pub use parsing::{parse_experiment, ParseError};

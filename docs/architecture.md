@@ -11,7 +11,7 @@ benchplane-schema ── strict public experiment and evidence records
         ▼
 benchplane-core ─── parsing, resolution, lifecycle, attempt provenance,
                     helper resource accounting, execution, validity, summaries, evidence writing,
-                    and verification
+                    verification, and bounded descriptive comparison
         │
         ▼
 benchplane CLI ───── thin command dispatch and human/JSON presentation
@@ -41,3 +41,5 @@ OpenTofu root → high-level experiment module → ephemeral node
 ```
 
 Experiments and studies depend on the framework. Framework code does not import, embed, or otherwise depend on files under `experiments/` or `studies/`. Repository checks may run catalog examples through the packaged public CLI.
+
+`benchplane evidence compare` is a read-only consumer of two independently verified bundles, not another execution lifecycle. It accepts only the concrete current local llama.cpp v2 measurement contract, compares measurement-affecting typed fields explicitly, and derives request/repetition statistics from verified raw records. It creates no run ID, helper process, evidence payload, study, or persistent state. Recorded platform/package differences remain contextual output rather than a generalized environment-equivalence policy.

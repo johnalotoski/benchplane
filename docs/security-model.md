@@ -11,6 +11,8 @@ Credentials must not appear in Nix derivations, the Nix store, OpenTofu variable
 
 Evidence checksums detect payload changes relative to the included checksum inventory and support internal consistency checks. New runs preserve bounded execution provenance for each attempt, but that self-reported context does not authenticate a publisher, host, or workflow, and a party able to replace the complete bundle can recompute the checksums. Signing and provenance attestations remain outside the current local execution scope.
 
+Evidence comparison is read-only and first subjects both bundles to the same path-safe, size-bounded checksum and semantic verifier. It never executes bundle content, starts a helper, contacts the network, mutates an input, or creates persistent comparison state. Its typed measurement data remains under the existing evidence file, line, record, and observation bounds.
+
 Attempt provenance is explicitly allowlisted and bounded. Benchplane reads only `/etc/os-release` keys `ID` and `VERSION_ID`, the kernel name and release from their fixed procfs files, and the first recognized CPU model/class field from a bounded `/proc/cpuinfo` read; it obtains architecture and available logical parallelism from the Rust runtime. It records no generic environment, command output, hostname, username, home path, machine ID, network address, cloud identity, hardware serial number, credential, or arbitrary procfs content. Invalid or unavailable optional facts become absent rather than triggering broad fallback discovery.
 
 AWS and vLLM are declarative-only schema variants. The executable local paths neither access cloud credentials nor start those runtimes; unsupported combinations are rejected before run allocation.

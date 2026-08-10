@@ -1,0 +1,6 @@
+{"runId":"run-019fe9ab-d56f-7a70-a199-bfbd92aa3cd3","sequence":1,"recordedAt":"2026-08-10T03:16:20.464Z","fromState":null,"toState":"created","attemptNumber":1,"failure":null}
+{"runId":"run-019fe9ab-d56f-7a70-a199-bfbd92aa3cd3","sequence":2,"recordedAt":"2026-08-10T03:16:20.464Z","fromState":"created","toState":"preparing","attemptNumber":1,"failure":null}
+{"runId":"run-019fe9ab-d56f-7a70-a199-bfbd92aa3cd3","sequence":3,"recordedAt":"2026-08-10T03:16:20.464Z","fromState":"preparing","toState":"running","attemptNumber":1,"failure":null}
+{"runId":"run-019fe9ab-d56f-7a70-a199-bfbd92aa3cd3","sequence":4,"recordedAt":"2026-08-10T03:16:22.357Z","fromState":"running","toState":"collecting","attemptNumber":1,"failure":null}
+{"runId":"run-019fe9ab-d56f-7a70-a199-bfbd92aa3cd3","sequence":5,"recordedAt":"2026-08-10T03:16:22.357Z","fromState":"collecting","toState":"finalizing","attemptNumber":1,"failure":null}
+{"runId":"run-019fe9ab-d56f-7a70-a199-bfbd92aa3cd3","sequence":6,"recordedAt":"2026-08-10T03:16:22.357Z","fromState":"finalizing","toState":"succeeded","attemptNumber":1,"failure":null}

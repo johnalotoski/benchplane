@@ -1,0 +1,47 @@
+{
+  "format": "benchplane-attempt-provenance/v1",
+  "runId": "run-019fe9ab-efa8-7d31-b631-25ab14491fb8",
+  "attemptNumber": 1,
+  "platform": {
+    "operatingSystem": {
+      "family": "linux",
+      "distribution": null,
+      "version": null
+    },
+    "kernel": {
+      "name": "Linux",
+      "release": "6.18.38"
+    },
+    "architecture": "x86_64",
+    "cpu": {
+      "model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+      "logicalCpuCount": 32
+    }
+  },
+  "software": {
+    "benchplane": {
+      "name": "benchplane",
+      "version": "0.1.0",
+      "nixStorePath": "/nix/store/6x7gjrdpscpmnmadcgav15mgn8wnaxv4-benchplane-0.1.0"
+    },
+    "runtime": {
+      "kind": "llamaCpp",
+      "generator": "benchplane-llama-cpp-smollm2/v2",
+      "engine": {
+        "name": "llama.cpp",
+        "version": "b10133",
+        "nixStorePath": "/nix/store/q8dp25q8mxcgyxnzw7s8pkjijz58lgsr-llama-cpp-10133"
+      },
+      "model": {
+        "identity": "smollm2-135m-instruct-q2-k-v1",
+        "sha256": "sha256:55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75",
+        "nixStorePath": "/nix/store/v62hgfmgd58sa322x19yklyz04mid5jw-SmolLM2-135M-Instruct.Q2_K.gguf"
+      },
+      "backend": {
+        "identity": "nixpkgs-llama-cpp-cpu-only-dynamic/v1",
+        "deviceClass": "cpu",
+        "nixStorePath": "/nix/store/q8dp25q8mxcgyxnzw7s8pkjijz58lgsr-llama-cpp-10133"
+      }
+    }
+  }
+}

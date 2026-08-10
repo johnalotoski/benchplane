@@ -1,0 +1,15 @@
+{
+  "runId": "run-019fe9ab-efa8-7d31-b631-25ab14491fb8",
+  "runStatus": "succeeded",
+  "attemptCount": 1,
+  "sampleCount": 3,
+  "validityStatus": "valid",
+  "latency": {
+    "meanMicros": 192302,
+    "p50Micros": 192648,
+    "p95Micros": 196611
+  },
+  "meanThroughputMilliRequestsPerSecond": 5180,
+  "experimentDigest": "sha256:55ac99cbe19c14b65ed3cbb26f86e78f4971b0d302e670e714ed35969758d12e",
+  "resolvedPlanDigest": "sha256:352f0e44a30ddc0a9113df614fc6a1b63ae494118871283612c10054cb6b3fdb"
+}

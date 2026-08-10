@@ -1,0 +1,8 @@
+{
+  "format": "benchplane-attempt-resources/v1",
+  "runId": "run-019fe9ab-d56f-7a70-a199-bfbd92aa3cd3",
+  "attemptNumber": 1,
+  "scope": "helperProcessLifetime",
+  "cpuTimeMicros": 1813380,
+  "peakRssBytes": 162508800
+}
