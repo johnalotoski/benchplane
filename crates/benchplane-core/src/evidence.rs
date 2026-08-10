@@ -883,6 +883,7 @@ fn validate_measurement_record(
                         );
                     }
                 }
+                validate_llama_v2_aggregate_consistency(record)?;
             }
             _ => return invalid_measurements("llamaCpp measurement generator is not supported"),
         },
@@ -891,6 +892,68 @@ fn validate_measurement_record(
         }
     }
     Ok(())
+}
+
+fn validate_llama_v2_aggregate_consistency(
+    record: &MeasurementRecord,
+) -> Result<(), EvidenceError> {
+    let latency_bounds = rounded_request_mean_bounds(
+        record
+            .request_observations
+            .iter()
+            .map(|observation| observation.latency_micros),
+    )
+    .ok_or_else(|| {
+        EvidenceError::InvalidMeasurements(
+            "llamaCpp v2 latency aggregate bounds are not representable".to_owned(),
+        )
+    })?;
+    let ttft_bounds = rounded_request_mean_bounds(
+        record
+            .request_observations
+            .iter()
+            .map(|observation| observation.time_to_first_token_micros),
+    )
+    .ok_or_else(|| {
+        EvidenceError::InvalidMeasurements(
+            "llamaCpp v2 TTFT aggregate bounds are not representable".to_owned(),
+        )
+    })?;
+    if !(latency_bounds.0..=latency_bounds.1).contains(&record.latency_micros)
+        || !(ttft_bounds.0..=ttft_bounds.1).contains(&record.time_to_first_token_micros)
+    {
+        return invalid_measurements(
+            "llamaCpp v2 aggregate latency or TTFT contradicts its request observations",
+        );
+    }
+    Ok(())
+}
+
+fn rounded_request_mean_bounds(mut values: impl Iterator<Item = u64>) -> Option<(u64, u64)> {
+    let (count, rounded_micros) =
+        values.try_fold((0_u128, 0_u128), |(count, total), value| -> Option<_> {
+            Some((count.checked_add(1)?, total.checked_add(value.into())?))
+        })?;
+    if count == 0 || rounded_micros < count {
+        return None;
+    }
+
+    // For an emitted observation m = ceil(raw_nanos / 1000), raw_nanos is in
+    // ((m - 1) * 1000, m * 1000]. Summing those exact integer-nanosecond
+    // intervals gives the tight range for the producer's ceil-of-the-raw-mean.
+    let minimum_raw_nanos = rounded_micros
+        .checked_sub(count)?
+        .checked_mul(1000)?
+        .checked_add(count)?;
+    let maximum_raw_nanos = rounded_micros.checked_mul(1000)?;
+    let divisor = count.checked_mul(1000)?;
+    let minimum = ceil_div_u128(minimum_raw_nanos, divisor);
+    let maximum = ceil_div_u128(maximum_raw_nanos, divisor);
+    Some((minimum.try_into().ok()?, maximum.try_into().ok()?))
+}
+
+fn ceil_div_u128(dividend: u128, divisor: u128) -> u128 {
+    dividend / divisor + u128::from(!dividend.is_multiple_of(divisor))
 }
 
 fn validate_attempt_resources(
@@ -1280,7 +1343,7 @@ mod tests {
         .expect("write resources");
     }
 
-    fn llama_plan() -> ResolvedExperiment {
+    fn llama_plan(requests: u32) -> ResolvedExperiment {
         let experiment: Experiment = serde_json::from_value(serde_json::json!({
             "apiVersion": "benchplane/v1alpha1",
             "kind": "Experiment",
@@ -1294,7 +1357,7 @@ mod tests {
                 },
                 "workload": {
                     "profile": "smollm2-chat-greedy-v1",
-                    "requests": 2,
+                    "requests": requests,
                     "concurrency": 1
                 },
                 "measurement": { "warmupRuns": 1, "repetitions": 2 },
@@ -1310,20 +1373,16 @@ mod tests {
         generator: &str,
         phase: MeasurementPhase,
         repetition_index: u32,
+        requests: u32,
     ) -> MeasurementRecord {
         let request_observations = if generator == LLAMA_CPP_GENERATOR_VERSION {
-            vec![
-                RequestObservation {
-                    request_index: 1,
-                    latency_micros: 19,
-                    time_to_first_token_micros: 9,
-                },
-                RequestObservation {
-                    request_index: 2,
-                    latency_micros: 21,
-                    time_to_first_token_micros: 11,
-                },
-            ]
+            (1..=requests)
+                .map(|request_index| RequestObservation {
+                    request_index,
+                    latency_micros: 20,
+                    time_to_first_token_micros: 10,
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -1336,7 +1395,7 @@ mod tests {
             latency_micros: 20,
             time_to_first_token_micros: 10,
             throughput_milli_requests_per_second: 1_000,
-            successful_requests: 2,
+            successful_requests: requests,
             failed_requests: 0,
             request_observations,
         }
@@ -1378,8 +1437,12 @@ mod tests {
     }
 
     fn llama_fixture(label: &str, generator: &str) -> TestDirectory {
+        llama_fixture_with_requests(label, generator, 2)
+    }
+
+    fn llama_fixture_with_requests(label: &str, generator: &str, requests: u32) -> TestDirectory {
         let directory = copy_fixture(label);
-        let plan = llama_plan();
+        let plan = llama_plan(requests);
         fs::write(
             directory.path.join("resolved-plan.json"),
             serde_json::to_vec_pretty(&plan).expect("serialize plan"),
@@ -1437,9 +1500,9 @@ mod tests {
         write_measurements(
             &directory.path,
             &[
-                llama_measurement(generator, MeasurementPhase::Warmup, 1),
-                llama_measurement(generator, MeasurementPhase::Measured, 1),
-                llama_measurement(generator, MeasurementPhase::Measured, 2),
+                llama_measurement(generator, MeasurementPhase::Warmup, 1, requests),
+                llama_measurement(generator, MeasurementPhase::Measured, 1, requests),
+                llama_measurement(generator, MeasurementPhase::Measured, 2, requests),
             ],
         );
         write_provenance(&directory.path, &llama_provenance(generator));
@@ -1484,6 +1547,71 @@ mod tests {
                     0
                 }
             );
+        }
+    }
+
+    #[test]
+    fn verifies_single_and_multiple_request_llama_v2_repetitions() {
+        for requests in [1, 2] {
+            let directory = llama_fixture_with_requests(
+                &format!("llama-v2-{requests}-requests"),
+                LLAMA_CPP_GENERATOR_VERSION,
+                requests,
+            );
+            verify_evidence_bundle(&directory.path).expect("llama v2 evidence should verify");
+            let records = read_measurements(&directory.path);
+            assert!(records.iter().all(|record| {
+                record.request_observations.len() == requests as usize
+                    && record.latency_micros == 20
+                    && record.time_to_first_token_micros == 10
+            }));
+        }
+    }
+
+    #[test]
+    fn rejects_rechecksummed_llama_v2_aggregate_mismatches() {
+        for (label, latency, ttft) in [("latency", 100_u64, 10_u64), ("ttft", 20, 19)] {
+            let directory = llama_fixture(
+                &format!("llama-v2-{label}-aggregate-mismatch"),
+                LLAMA_CPP_GENERATOR_VERSION,
+            );
+            let mut records = read_measurements(&directory.path);
+            records[0].latency_micros = latency;
+            records[0].time_to_first_token_micros = ttft;
+            write_measurements(&directory.path, &records);
+            rewrite_checksums(&directory.path);
+            assert!(matches!(
+                verify_evidence_bundle(&directory.path),
+                Err(EvidenceError::InvalidMeasurements(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn llama_v2_aggregate_rounding_interval_is_tight() {
+        for (aggregate, accepted) in [(2_u64, true), (3, true), (1, false), (4, false)] {
+            let directory = llama_fixture(
+                &format!("llama-v2-rounding-boundary-{aggregate}"),
+                LLAMA_CPP_GENERATOR_VERSION,
+            );
+            let mut records = read_measurements(&directory.path);
+            records[0].request_observations = vec![
+                RequestObservation {
+                    request_index: 1,
+                    latency_micros: 2,
+                    time_to_first_token_micros: 1,
+                },
+                RequestObservation {
+                    request_index: 2,
+                    latency_micros: 3,
+                    time_to_first_token_micros: 1,
+                },
+            ];
+            records[0].latency_micros = aggregate;
+            records[0].time_to_first_token_micros = 1;
+            write_measurements(&directory.path, &records);
+            rewrite_checksums(&directory.path);
+            assert_eq!(verify_evidence_bundle(&directory.path).is_ok(), accepted);
         }
     }
 
@@ -1546,6 +1674,7 @@ mod tests {
                     LLAMA_CPP_GENERATOR_VERSION,
                     MeasurementPhase::Measured,
                     3,
+                    2,
                 )),
                 "phase" => records[0].phase = MeasurementPhase::Measured,
                 "generator" => records[0].generator = CPU_PROBE_GENERATOR_VERSION.to_owned(),
