@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const ATTEMPT_PROVENANCE_FORMAT_V1: &str = "benchplane-attempt-provenance/v1";
 pub const ATTEMPT_RESOURCES_FORMAT_V1: &str = "benchplane-attempt-resources/v1";
+pub const EVIDENCE_COMPARISON_FORMAT_V1: &str = "benchplane-evidence-comparison/v1";
 pub const BENCHPLANE_SOFTWARE_NAME: &str = "benchplane";
 pub const LLAMA_CPP_ENGINE_NAME: &str = "llama.cpp";
 pub const LLAMA_CPP_ENGINE_VERSION: &str = "b10133";
@@ -364,6 +365,133 @@ pub struct RunResult {
     pub resolved_plan_digest: String,
     pub evidence_digest: String,
     pub failure: Option<FailureRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvidenceComparison {
+    pub format: String,
+    pub baseline: BundleIdentity,
+    pub candidate: BundleIdentity,
+    pub compatible: bool,
+    pub incompatibilities: Vec<String>,
+    pub measurement_contract: Option<LlamaMeasurementContract>,
+    pub environment: Vec<EnvironmentComparison>,
+    pub requests: Option<RequestScopeComparison>,
+    pub repetitions: Option<RepetitionScopeComparison>,
+    pub attempt_resources: Option<AttemptResourceComparison>,
+    pub interpretation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BundleIdentity {
+    pub bundle_path: String,
+    pub run_id: String,
+    pub experiment_digest: String,
+    pub resolved_plan_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LlamaMeasurementContract {
+    pub provider: String,
+    pub runtime: String,
+    pub generator: String,
+    pub model: String,
+    pub model_sha256: String,
+    pub engine_name: String,
+    pub engine_version: String,
+    pub backend: String,
+    pub device_class: DeviceClass,
+    pub workload_profile: String,
+    pub output_tokens: u32,
+    pub requests_per_repetition: u32,
+    pub concurrency: u32,
+    pub warmup_runs: u32,
+    pub measured_repetitions: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum EnvironmentRelationship {
+    Same,
+    Different,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentComparison {
+    pub field: String,
+    pub baseline: Option<String>,
+    pub candidate: Option<String>,
+    pub relationship: EnvironmentRelationship,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IntegerDelta {
+    pub absolute_delta: i128,
+    /// Thousandths of one percent. Absent when the baseline is zero.
+    pub percentage_delta_milli_percent: Option<i128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MetricComparison {
+    pub baseline: u64,
+    pub candidate: u64,
+    pub delta: IntegerDelta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DistributionComparison {
+    pub baseline: LatencySummary,
+    pub candidate: LatencySummary,
+    pub mean: MetricComparison,
+    pub p50: MetricComparison,
+    pub p95: MetricComparison,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestScopeComparison {
+    pub unit: String,
+    pub baseline_count: u64,
+    pub candidate_count: u64,
+    pub latency_micros: DistributionComparison,
+    pub time_to_first_token_micros: DistributionComparison,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepetitionScopeComparison {
+    pub unit: String,
+    pub baseline_count: u64,
+    pub candidate_count: u64,
+    pub aggregate_latency_micros: DistributionComparison,
+    pub aggregate_time_to_first_token_micros: DistributionComparison,
+    pub mean_throughput_milli_requests_per_second: MetricComparison,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttemptResourceValues {
+    pub scope: ResourceScope,
+    pub cpu_time_micros: u64,
+    pub peak_rss_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttemptResourceComparison {
+    pub unit: String,
+    pub baseline: Option<AttemptResourceValues>,
+    pub candidate: Option<AttemptResourceValues>,
+    pub cpu_time_micros: Option<MetricComparison>,
+    pub peak_rss_bytes: Option<MetricComparison>,
 }
 
 #[cfg(test)]

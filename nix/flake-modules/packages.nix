@@ -438,9 +438,23 @@
             "$bundle/attempts/0001/resources.json" > /dev/null
           grep -F '  attempts/0001/resources.json' "$bundle/SHA256SUMS" > /dev/null
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
+          ${benchplane}/bin/benchplane evidence compare "$bundle" "$bundle" --json \
+            > comparison.json
+          ${pkgs.jq}/bin/jq -e \
+            '.format == "benchplane-evidence-comparison/v1" and
+             .compatible == true and
+             .requests.baselineCount == 6 and .requests.candidateCount == 6 and
+             .repetitions.baselineCount == 3 and .repetitions.candidateCount == 3 and
+             .requests.latencyMicros.mean.delta.absoluteDelta == 0 and
+             .repetitions.meanThroughputMilliRequestsPerSecond.delta.absoluteDelta == 0 and
+             .attemptResources.unit == "helperProcessLifetime" and
+             .attemptResources.cpuTimeMicros.delta.absoluteDelta == 0 and
+             .attemptResources.peakRssBytes.delta.absoluteDelta == 0' \
+            comparison.json > /dev/null
           mkdir $out
           cp "$resultFile" $out/result.json
           cp verified.txt $out/
+          cp comparison.json $out/
         '';
       };
     };

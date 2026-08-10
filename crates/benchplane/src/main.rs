@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use benchplane_core::{
-    parse_experiment, resolve_experiment, run_experiment, verify_evidence_bundle, ResolutionError,
-    RunOptions,
+    compare_evidence_bundles, parse_experiment, resolve_experiment, run_experiment,
+    verify_evidence_bundle, EvidenceComparison, MetricComparison, ResolutionError, RunOptions,
 };
 use benchplane_schema::{Experiment, RunResult, RunState, ValidityStatus};
 use clap::{Parser, Subcommand};
@@ -62,8 +62,16 @@ enum SchemaCommand {
 
 #[derive(Debug, Subcommand)]
 enum EvidenceCommand {
-    /// Verify an evidence bundle manifest and checksums.
+    /// Verify evidence checksums and bounded semantic consistency.
     Verify { bundle: PathBuf },
+
+    /// Descriptively compare two verified current llama.cpp evidence bundles.
+    Compare {
+        baseline_bundle: PathBuf,
+        candidate_bundle: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -110,7 +118,164 @@ fn execute(cli: Cli) -> u8 {
                 EXIT_FINALIZATION_FAILURE
             }
         },
+        Command::Evidence {
+            command:
+                EvidenceCommand::Compare {
+                    baseline_bundle,
+                    candidate_bundle,
+                    json,
+                },
+        } => match compare_evidence_bundles(&baseline_bundle, &candidate_bundle) {
+            Ok(comparison) => {
+                if json {
+                    match serde_json::to_string(&comparison) {
+                        Ok(output) => println!("{output}"),
+                        Err(error) => return internal_error(error),
+                    }
+                } else {
+                    print_human_comparison(&comparison);
+                }
+                EXIT_SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                EXIT_FINALIZATION_FAILURE
+            }
+        },
     }
+}
+
+fn print_human_comparison(comparison: &EvidenceComparison) {
+    println!(
+        "baseline: {} ({})",
+        comparison.baseline.run_id, comparison.baseline.bundle_path
+    );
+    println!(
+        "candidate: {} ({})",
+        comparison.candidate.run_id, comparison.candidate.bundle_path
+    );
+    println!(
+        "measurement compatible: {}",
+        if comparison.compatible { "yes" } else { "no" }
+    );
+    if !comparison.compatible {
+        println!(
+            "incompatible dimensions: {}",
+            comparison.incompatibilities.join(", ")
+        );
+        println!("{}", comparison.interpretation);
+        return;
+    }
+
+    let differences: Vec<_> = comparison
+        .environment
+        .iter()
+        .filter(|field| {
+            !matches!(
+                field.relationship,
+                benchplane_core::EnvironmentRelationship::Same
+            )
+        })
+        .collect();
+    println!(
+        "recorded environment differences/unknowns: {}",
+        differences.len()
+    );
+    for field in differences {
+        println!(
+            "  {}: baseline={} candidate={} ({:?})",
+            field.field,
+            field.baseline.as_deref().unwrap_or("unknown"),
+            field.candidate.as_deref().unwrap_or("unknown"),
+            field.relationship
+        );
+    }
+    let requests = comparison
+        .requests
+        .as_ref()
+        .expect("compatible comparison has request metrics");
+    println!(
+        "measured requests: baseline={} candidate={}",
+        requests.baseline_count, requests.candidate_count
+    );
+    print_metric("request latency mean (µs)", &requests.latency_micros.mean);
+    print_metric("request latency p50 (µs)", &requests.latency_micros.p50);
+    print_metric("request latency p95 (µs)", &requests.latency_micros.p95);
+    print_metric(
+        "request TTFT mean (µs)",
+        &requests.time_to_first_token_micros.mean,
+    );
+    print_metric(
+        "request TTFT p50 (µs)",
+        &requests.time_to_first_token_micros.p50,
+    );
+    print_metric(
+        "request TTFT p95 (µs)",
+        &requests.time_to_first_token_micros.p95,
+    );
+
+    let repetitions = comparison
+        .repetitions
+        .as_ref()
+        .expect("compatible comparison has repetition metrics");
+    println!(
+        "measured repetitions: baseline={} candidate={}",
+        repetitions.baseline_count, repetitions.candidate_count
+    );
+    print_metric(
+        "repetition aggregate latency mean (µs)",
+        &repetitions.aggregate_latency_micros.mean,
+    );
+    print_metric(
+        "repetition aggregate latency p50 (µs)",
+        &repetitions.aggregate_latency_micros.p50,
+    );
+    print_metric(
+        "repetition aggregate latency p95 (µs)",
+        &repetitions.aggregate_latency_micros.p95,
+    );
+    print_metric(
+        "repetition aggregate TTFT mean (µs)",
+        &repetitions.aggregate_time_to_first_token_micros.mean,
+    );
+    print_metric(
+        "repetition aggregate TTFT p50 (µs)",
+        &repetitions.aggregate_time_to_first_token_micros.p50,
+    );
+    print_metric(
+        "repetition aggregate TTFT p95 (µs)",
+        &repetitions.aggregate_time_to_first_token_micros.p95,
+    );
+    print_metric(
+        "repetition mean throughput (mreq/s)",
+        &repetitions.mean_throughput_milli_requests_per_second,
+    );
+
+    if let Some(resources) = &comparison.attempt_resources {
+        if let Some(cpu) = &resources.cpu_time_micros {
+            print_metric("whole-helper CPU time (µs)", cpu);
+        } else {
+            println!("whole-helper CPU time: not comparable (missing resource evidence)");
+        }
+        if let Some(rss) = &resources.peak_rss_bytes {
+            print_metric("whole-helper peak RSS (bytes)", rss);
+        } else {
+            println!("whole-helper peak RSS: not comparable (missing resource evidence)");
+        }
+    }
+    println!("{}", comparison.interpretation);
+}
+
+fn print_metric(label: &str, metric: &MetricComparison) {
+    let percentage = metric
+        .delta
+        .percentage_delta_milli_percent
+        .map(|value| format!("{:.3}%", value as f64 / 1_000.0))
+        .unwrap_or_else(|| "undefined".to_owned());
+    println!(
+        "{label}: baseline={} candidate={} delta={:+} ({percentage})",
+        metric.baseline, metric.candidate, metric.delta.absolute_delta
+    );
 }
 
 fn read_experiment_bytes(path: &PathBuf) -> Result<Vec<u8>, u8> {

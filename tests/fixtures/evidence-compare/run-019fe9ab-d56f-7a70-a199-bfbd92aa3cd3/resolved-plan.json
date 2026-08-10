@@ -1,0 +1,46 @@
+{
+  "apiVersion": "benchplane/v1alpha1",
+  "kind": "ResolvedExperiment",
+  "experiment": {
+    "apiVersion": "benchplane/v1alpha1",
+    "kind": "Experiment",
+    "metadata": {
+      "name": "local-llama-cpp-smoke",
+      "labels": {
+        "purpose": "smoke"
+      }
+    },
+    "spec": {
+      "provider": {
+        "kind": "local"
+      },
+      "runtime": {
+        "kind": "llamaCpp",
+        "model": "smollm2-135m-instruct-q2-k-v1",
+        "outputTokens": 4
+      },
+      "workload": {
+        "profile": "smollm2-chat-greedy-v1",
+        "requests": 2,
+        "concurrency": 1
+      },
+      "measurement": {
+        "warmupRuns": 1,
+        "repetitions": 3
+      },
+      "budget": {
+        "maximumCostUsd": 0.0
+      },
+      "lifecycle": {
+        "maximumRuntimeSeconds": 120,
+        "destroyOnCompletion": true
+      },
+      "artifacts": {
+        "public": false,
+        "format": "benchplane-evidence/v1"
+      }
+    }
+  },
+  "experimentDigest": "sha256:55ac99cbe19c14b65ed3cbb26f86e78f4971b0d302e670e714ed35969758d12e",
+  "resolvedPlanDigest": "sha256:352f0e44a30ddc0a9113df614fc6a1b63ae494118871283612c10054cb6b3fdb"
+}

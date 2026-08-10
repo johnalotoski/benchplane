@@ -119,6 +119,21 @@ pub enum EvidenceError {
 }
 
 pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceError> {
+    verify_evidence_bundle_data(root).map(|bundle| bundle.manifest)
+}
+
+pub(crate) struct VerifiedEvidenceBundle {
+    pub root: PathBuf,
+    pub manifest: EvidenceManifest,
+    pub plan: ResolvedExperiment,
+    pub provenance: Option<AttemptProvenance>,
+    pub resources: Option<AttemptResources>,
+    pub measurements: Vec<MeasurementRecord>,
+}
+
+pub(crate) fn verify_evidence_bundle_data(
+    root: &Path,
+) -> Result<VerifiedEvidenceBundle, EvidenceError> {
     let root = canonical_bundle_root(root)?;
     let payloads = gather_payload_paths(&root)?;
     let sums_path = checked_regular_path(&root, Path::new("SHA256SUMS"), "SHA256SUMS")?;
@@ -222,9 +237,7 @@ pub fn verify_evidence_bundle(root: &Path) -> Result<EvidenceManifest, EvidenceE
         serde_json::from_slice(manifest_bytes).map_err(EvidenceError::Manifest)?;
     validate_manifest(&manifest)?;
     validate_required_payloads(&checked_names)?;
-    validate_record_consistency(&root, &manifest, &retained_records, &verified_digests)?;
-
-    Ok(manifest)
+    validate_record_consistency(root, manifest, &retained_records, &verified_digests)
 }
 
 pub(crate) struct PendingEvidenceDigest(Sha256);
@@ -538,24 +551,24 @@ fn parse_record<T: serde::de::DeserializeOwned>(
 }
 
 fn validate_record_consistency(
-    root: &Path,
-    manifest: &EvidenceManifest,
+    root: PathBuf,
+    manifest: EvidenceManifest,
     records: &BTreeMap<String, Vec<u8>>,
     verified_digests: &BTreeMap<String, String>,
-) -> Result<(), EvidenceError> {
+) -> Result<VerifiedEvidenceBundle, EvidenceError> {
     if root.file_name().and_then(|name| name.to_str()) != Some(manifest.run_id.as_str()) {
         return Err(EvidenceError::BundleRunIdMismatch);
     }
 
     let plan: ResolvedExperiment = parse_record(records, "resolved-plan.json")?;
-    validate_resolved_plan(&plan, manifest)?;
+    validate_resolved_plan(&plan, &manifest)?;
     let measurement_digest = verified_digests
         .get("attempts/0001/measurements.jsonl")
         .ok_or_else(|| {
             EvidenceError::MissingRequiredPayload("attempts/0001/measurements.jsonl".to_owned())
         })?;
     let measurement_validation =
-        validate_measurements(root, measurement_digest, &plan, manifest.run_status)?;
+        validate_measurements(&root, measurement_digest, &plan, manifest.run_status)?;
 
     let run: RunRecord = parse_record(records, "run.json")?;
     if run.run_id != manifest.run_id
@@ -581,7 +594,7 @@ fn validate_record_consistency(
             "attempts/0001/attempt.json".to_owned(),
         ));
     }
-    if let Some(bytes) = records.get("attempts/0001/provenance.json") {
+    let provenance = if let Some(bytes) = records.get("attempts/0001/provenance.json") {
         let provenance: AttemptProvenance =
             serde_json::from_slice(bytes).map_err(|source| EvidenceError::InvalidRecord {
                 path: "attempts/0001/provenance.json".to_owned(),
@@ -589,19 +602,25 @@ fn validate_record_consistency(
             })?;
         validate_attempt_provenance(
             &provenance,
-            manifest,
+            &manifest,
             &plan,
             measurement_validation.generator.as_deref(),
         )?;
-    }
-    if let Some(bytes) = records.get("attempts/0001/resources.json") {
+        Some(provenance)
+    } else {
+        None
+    };
+    let resources = if let Some(bytes) = records.get("attempts/0001/resources.json") {
         let resources: AttemptResources =
             serde_json::from_slice(bytes).map_err(|source| EvidenceError::InvalidRecord {
                 path: "attempts/0001/resources.json".to_owned(),
                 source,
             })?;
-        validate_attempt_resources(&resources, manifest, &plan)?;
-    }
+        validate_attempt_resources(&resources, &manifest, &plan)?;
+        Some(resources)
+    } else {
+        None
+    };
     let validity: ValidityResult = parse_record(records, "validity.json")?;
     let expected_validity = match manifest.run_status {
         RunState::Succeeded
@@ -625,6 +644,28 @@ fn validate_record_consistency(
         ));
     }
     let summary: RunSummary = parse_record(records, "summary.json")?;
+    let measured: Vec<_> = measurement_validation
+        .records
+        .iter()
+        .filter(|record| record.phase == MeasurementPhase::Measured)
+        .collect();
+    let (expected_latency, expected_throughput) =
+        if measured.is_empty() || manifest.validity_status == ValidityStatus::Indeterminate {
+            (None, None)
+        } else {
+            let latencies: Vec<_> = measured
+                .iter()
+                .map(|record| record.latency_micros)
+                .collect();
+            let throughputs: Vec<_> = measured
+                .iter()
+                .map(|record| record.throughput_milli_requests_per_second)
+                .collect();
+            (
+                crate::execution::describe_micros(&latencies),
+                crate::execution::mean_u64(&throughputs),
+            )
+        };
     if summary.run_id != manifest.run_id
         || summary.run_status != manifest.run_status
         || summary.validity_status != manifest.validity_status
@@ -632,6 +673,8 @@ fn validate_record_consistency(
         || summary.sample_count != measurement_validation.measured_records
         || summary.experiment_digest != manifest.experiment_digest
         || summary.resolved_plan_digest != manifest.resolved_plan_digest
+        || summary.latency != expected_latency
+        || summary.mean_throughput_milli_requests_per_second != expected_throughput
     {
         return Err(EvidenceError::InconsistentRecord("summary.json".to_owned()));
     }
@@ -652,12 +695,20 @@ fn validate_record_consistency(
             return Err(EvidenceError::InconsistentRecord("events.jsonl".to_owned()));
         }
     }
-    Ok(())
+    Ok(VerifiedEvidenceBundle {
+        root,
+        manifest,
+        plan,
+        provenance,
+        resources,
+        measurements: measurement_validation.records,
+    })
 }
 
 struct MeasurementValidation {
     measured_records: u32,
     generator: Option<String>,
+    records: Vec<MeasurementRecord>,
 }
 
 fn validate_resolved_plan(
@@ -712,6 +763,7 @@ fn validate_measurements(
     let mut total_bytes = 0_u64;
     let mut position = 0_u32;
     let mut generator: Option<String> = None;
+    let mut records = Vec::with_capacity(expected_total as usize);
 
     loop {
         line.clear();
@@ -759,6 +811,7 @@ fn validate_measurements(
         if generator.is_none() {
             generator = Some(record.generator.clone());
         }
+        records.push(record);
         position += 1;
     }
 
@@ -773,6 +826,7 @@ fn validate_measurements(
     Ok(MeasurementValidation {
         measured_records: expected_measured,
         generator,
+        records,
     })
 }
 
@@ -1477,6 +1531,12 @@ mod tests {
         )
         .expect("parse summary");
         summary.sample_count = 2;
+        summary.latency = Some(benchplane_schema::LatencySummary {
+            mean_micros: 20,
+            p50_micros: 20,
+            p95_micros: 20,
+        });
+        summary.mean_throughput_milli_requests_per_second = Some(1_000);
         summary.experiment_digest = plan.experiment_digest.clone();
         summary.resolved_plan_digest = plan.resolved_plan_digest.clone();
         fs::write(
@@ -1519,10 +1579,248 @@ mod tests {
             .collect()
     }
 
+    fn rewrite_summary_metrics(root: &Path, measurements: &[MeasurementRecord]) {
+        let measured: Vec<_> = measurements
+            .iter()
+            .filter(|record| record.phase == MeasurementPhase::Measured)
+            .collect();
+        let latencies: Vec<_> = measured
+            .iter()
+            .map(|record| record.latency_micros)
+            .collect();
+        let throughputs: Vec<_> = measured
+            .iter()
+            .map(|record| record.throughput_milli_requests_per_second)
+            .collect();
+        let mut summary: RunSummary =
+            serde_json::from_slice(&fs::read(root.join("summary.json")).expect("read summary"))
+                .expect("parse summary");
+        summary.latency = crate::execution::describe_micros(&latencies);
+        summary.mean_throughput_milli_requests_per_second =
+            crate::execution::mean_u64(&throughputs);
+        fs::write(
+            root.join("summary.json"),
+            serde_json::to_vec_pretty(&summary).expect("serialize summary"),
+        )
+        .expect("write summary");
+    }
+
+    fn rewrite_resolved_plan(root: &Path, plan: &ResolvedExperiment) {
+        fs::write(
+            root.join("resolved-plan.json"),
+            serde_json::to_vec_pretty(plan).expect("serialize plan"),
+        )
+        .expect("write plan");
+        let mut manifest: EvidenceManifest =
+            serde_json::from_slice(&fs::read(root.join("manifest.json")).expect("read manifest"))
+                .expect("parse manifest");
+        manifest.experiment_digest = plan.experiment_digest.clone();
+        manifest.resolved_plan_digest = plan.resolved_plan_digest.clone();
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+        let mut run: RunRecord =
+            serde_json::from_slice(&fs::read(root.join("run.json")).expect("read run"))
+                .expect("parse run");
+        run.experiment_digest = plan.experiment_digest.clone();
+        run.resolved_plan_digest = plan.resolved_plan_digest.clone();
+        fs::write(
+            root.join("run.json"),
+            serde_json::to_vec_pretty(&run).expect("serialize run"),
+        )
+        .expect("write run");
+        let mut summary: RunSummary =
+            serde_json::from_slice(&fs::read(root.join("summary.json")).expect("read summary"))
+                .expect("parse summary");
+        summary.experiment_digest = plan.experiment_digest.clone();
+        summary.resolved_plan_digest = plan.resolved_plan_digest.clone();
+        fs::write(
+            root.join("summary.json"),
+            serde_json::to_vec_pretty(&summary).expect("serialize summary"),
+        )
+        .expect("write summary");
+    }
+
     #[test]
     fn verifies_the_checked_in_fixture() {
         let manifest = verify_evidence_bundle(&fixture_root()).expect("fixture should verify");
         assert_eq!(manifest.format, EVIDENCE_FORMAT_V1);
+    }
+
+    #[test]
+    fn rejects_rechecksummed_false_numerical_summary() {
+        let directory = llama_fixture("llama-false-numerical-summary", LLAMA_CPP_GENERATOR_VERSION);
+        let mut summary: RunSummary = serde_json::from_slice(
+            &fs::read(directory.path.join("summary.json")).expect("read summary"),
+        )
+        .expect("parse summary");
+        summary
+            .latency
+            .as_mut()
+            .expect("latency summary")
+            .p95_micros += 1;
+        fs::write(
+            directory.path.join("summary.json"),
+            serde_json::to_vec_pretty(&summary).expect("serialize summary"),
+        )
+        .expect("write summary");
+        rewrite_checksums(&directory.path);
+
+        assert!(matches!(
+            verify_evidence_bundle(&directory.path),
+            Err(EvidenceError::InconsistentRecord(path)) if path == "summary.json"
+        ));
+    }
+
+    #[test]
+    fn compares_verified_current_llama_bundles_from_raw_measured_values() {
+        let baseline = llama_fixture("comparison-baseline", LLAMA_CPP_GENERATOR_VERSION);
+        let candidate = llama_fixture("comparison-candidate", LLAMA_CPP_GENERATOR_VERSION);
+        let mut records = read_measurements(&candidate.path);
+        for observation in &mut records[0].request_observations {
+            observation.latency_micros = 9_000;
+            observation.time_to_first_token_micros = 8_000;
+        }
+        records[0].latency_micros = 9_000;
+        records[0].time_to_first_token_micros = 8_000;
+        for (record, (latency, ttft, throughput)) in records[1..]
+            .iter_mut()
+            .zip([(30_u64, 15_u64, 2_000_u64), (50_u64, 25_u64, 3_000_u64)])
+        {
+            record.latency_micros = latency;
+            record.time_to_first_token_micros = ttft;
+            record.throughput_milli_requests_per_second = throughput;
+            for observation in &mut record.request_observations {
+                observation.latency_micros = latency;
+                observation.time_to_first_token_micros = ttft;
+            }
+        }
+        write_measurements(&candidate.path, &records);
+        rewrite_summary_metrics(&candidate.path, &records);
+        let mut provenance: AttemptProvenance = serde_json::from_slice(
+            &fs::read(candidate.path.join("attempts/0001/provenance.json"))
+                .expect("read provenance"),
+        )
+        .expect("parse provenance");
+        provenance.platform.cpu.model = Some("Different Example CPU".to_owned());
+        write_provenance(&candidate.path, &provenance);
+        let mut resources = valid_resources();
+        resources.cpu_time_micros = 24_690;
+        resources.peak_rss_bytes = 8_388_608;
+        write_resources(&candidate.path, &resources);
+        rewrite_checksums(&candidate.path);
+
+        let comparison =
+            crate::comparison::compare_evidence_bundles(&baseline.path, &candidate.path)
+                .expect("compatible comparison");
+        assert!(comparison.compatible);
+        let requests = comparison.requests.as_ref().expect("request comparison");
+        assert_eq!((requests.baseline_count, requests.candidate_count), (4, 4));
+        assert_eq!(requests.latency_micros.baseline.mean_micros, 20);
+        assert_eq!(requests.latency_micros.candidate.mean_micros, 40);
+        assert_eq!(requests.latency_micros.candidate.p50_micros, 30);
+        assert_eq!(requests.latency_micros.candidate.p95_micros, 50);
+        assert_eq!(
+            requests.time_to_first_token_micros.candidate.mean_micros,
+            20
+        );
+        assert_eq!(requests.latency_micros.mean.delta.absolute_delta, 20);
+        assert_eq!(
+            requests
+                .latency_micros
+                .mean
+                .delta
+                .percentage_delta_milli_percent,
+            Some(100_000)
+        );
+        let repetitions = comparison
+            .repetitions
+            .as_ref()
+            .expect("repetition comparison");
+        assert_eq!(
+            repetitions.aggregate_latency_micros.candidate.mean_micros,
+            40
+        );
+        assert_eq!(
+            repetitions
+                .mean_throughput_milli_requests_per_second
+                .candidate,
+            2_500
+        );
+        let resources = comparison
+            .attempt_resources
+            .as_ref()
+            .expect("resource comparison");
+        assert_eq!(
+            resources
+                .cpu_time_micros
+                .as_ref()
+                .expect("CPU delta")
+                .delta
+                .absolute_delta,
+            12_345
+        );
+        assert_eq!(
+            resources
+                .peak_rss_bytes
+                .as_ref()
+                .expect("RSS delta")
+                .delta
+                .absolute_delta,
+            4_194_304
+        );
+        assert!(comparison.environment.iter().any(|field| {
+            field.field == "platform.cpu.model"
+                && field.relationship == benchplane_schema::EnvironmentRelationship::Different
+        }));
+        assert!(!serde_json::to_string(&comparison)
+            .expect("serialize comparison")
+            .contains("9000"));
+    }
+
+    #[test]
+    fn comparison_rejects_historical_llama_v1_and_invalid_evidence() {
+        let historical = llama_fixture("comparison-v1", LLAMA_CPP_GENERATOR_VERSION_V1);
+        let current = llama_fixture("comparison-v2", LLAMA_CPP_GENERATOR_VERSION);
+        let error = crate::comparison::compare_evidence_bundles(&historical.path, &current.path)
+            .expect_err("v1 is not eligible");
+        assert!(error.to_string().contains("requires current request-level"));
+
+        fs::write(current.path.join("summary.json"), b"{}\n").expect("tamper summary");
+        let error = crate::comparison::compare_evidence_bundles(&historical.path, &current.path)
+            .expect_err("candidate must verify before analysis");
+        assert!(error
+            .to_string()
+            .contains("candidate evidence bundle is invalid"));
+    }
+
+    #[test]
+    fn comparison_reports_concrete_measurement_contract_mismatches() {
+        let baseline = llama_fixture("comparison-compatible-plan", LLAMA_CPP_GENERATOR_VERSION);
+        let candidate = llama_fixture("comparison-different-plan", LLAMA_CPP_GENERATOR_VERSION);
+        let mut plan: ResolvedExperiment = serde_json::from_slice(
+            &fs::read(candidate.path.join("resolved-plan.json")).expect("read plan"),
+        )
+        .expect("parse plan");
+        let RuntimeSpec::LlamaCpp { output_tokens, .. } = &mut plan.experiment.spec.runtime else {
+            unreachable!("llama fixture plan")
+        };
+        *output_tokens = 8;
+        plan = crate::resolution::resolve_experiment(plan.experiment)
+            .expect("resolve changed valid plan");
+        rewrite_resolved_plan(&candidate.path, &plan);
+        rewrite_checksums(&candidate.path);
+
+        let comparison =
+            crate::comparison::compare_evidence_bundles(&baseline.path, &candidate.path)
+                .expect("both bundles independently verify");
+        assert!(!comparison.compatible);
+        assert_eq!(comparison.incompatibilities, ["outputTokens"]);
+        assert!(comparison.requests.is_none());
+        assert!(comparison.repetitions.is_none());
+        assert!(comparison.attempt_resources.is_none());
     }
 
     #[test]

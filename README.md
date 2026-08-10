@@ -21,7 +21,7 @@ Many individual pieces already exist: vLLM packaging, NixOS GPU support, cloud p
 
 ## Current status
 
-This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, capture bounded attempt-scoped execution provenance, execute deterministic local-fake work, a measured local CPU token probe, or real packaged CPU-only model inference, retain bounded llama.cpp request observations, account for supervised helper CPU time and peak RSS, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. The same lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
+This repository is an early modular monolith. Its local vertical slices parse and semantically validate `benchplane/v1alpha1` experiment YAML, materialize defaults into a deterministic resolved plan, capture bounded attempt-scoped execution provenance, execute deterministic local-fake work, a measured local CPU token probe, or real packaged CPU-only model inference, retain bounded llama.cpp request observations, account for supervised helper CPU time and peak RSS, evaluate validity, summarize measurements, and atomically publish a verified evidence bundle. It can also descriptively compare two verified, measurement-compatible current llama.cpp bundles. The same execution lifecycle runs either directly from the CLI or inside an unprivileged NixOS systemd service.
 
 It also establishes the intended boundaries for:
 
@@ -71,6 +71,15 @@ New bundles also contain `attempts/0001/provenance.json`, an integrity-covered r
 Helper-backed CPU-probe and llama.cpp runs additionally contain `attempts/0001/resources.json`. It records exact Linux accounting for the supervised helper's full process lifetime: user-plus-system `cpuTimeMicros` and peak resident-set high-water `peakRssBytes`. Llama accounting therefore includes startup, model loading, warmups, measured repetitions, and teardown; it does not change latency or TTFT semantics. These values are not CPU utilization, per-request cost, system-wide or exclusive memory, energy, contention, or a basis for cross-host comparability. In-process `localFake` runs have no equivalent helper observation, and historical evidence-v1 bundles without resources remain verifiable.
 
 For current llama.cpp evidence, every warmup and measured repetition aggregate contains one numeric request observation per configured request. Model initialization remains outside request latency and TTFT. Warmup observations remain excluded from validity and summaries, and the displayed p50/p95 values remain statistics over measured repetition aggregates—not request-tail percentiles. The retained observations enable later distribution analysis, but this slice computes no confidence intervals and makes no independence or cross-host-comparability claim. Historical aggregate-only llama evidence remains verifiable.
+
+Compare two independently generated current llama.cpp bundles without executing a workload or changing either bundle:
+
+```console
+benchplane evidence compare BASELINE_BUNDLE CANDIDATE_BUNDLE
+benchplane evidence compare BASELINE_BUNDLE CANDIDATE_BUNDLE --json
+```
+
+Both inputs first pass the same bounded semantic verification as `benchplane evidence verify`. Comparison requires successful, valid local llama.cpp v2 runs with equal model/engine/backend, workload profile, output-token target, request/concurrency counts, and warmup/repetition counts. Recorded platform and package differences are reported as context rather than treated as workload incompatibility. Request latency/TTFT and repetition aggregate latency/TTFT/throughput are recomputed from measured, non-warmup records; helper CPU time and peak RSS remain whole-helper-lifetime observations. Results are deterministic descriptive arithmetic using floor means and nearest-rank p50/p95, not confidence, significance, independence, causality, or cross-host equivalence claims. Historical llama v1 remains verifiable but is not comparison-eligible.
 
 The first cloud milestone may later extend this path to one single-GPU vLLM experiment, but AWS and vLLM execution remain intentionally unimplemented.
 

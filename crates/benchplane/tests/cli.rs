@@ -41,6 +41,13 @@ fn fixture(relative: &str) -> PathBuf {
     repository_root().join("tests/fixtures").join(relative)
 }
 
+fn comparison_fixtures() -> (PathBuf, PathBuf) {
+    (
+        fixture("evidence-compare/run-019fe9ab-d56f-7a70-a199-bfbd92aa3cd3"),
+        fixture("evidence-compare/run-019fe9ab-efa8-7d31-b631-25ab14491fb8"),
+    )
+}
+
 fn benchplane(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_benchplane"))
         .env("BENCHPLANE_TEST_SECRET", SENSITIVE_ENV_SENTINEL)
@@ -394,6 +401,121 @@ fn evidence_verify_accepts_fixture_and_detects_tampering() {
     ]);
     assert_eq!(rejected.status.code(), Some(5));
     assert!(output_text(&rejected.stderr).contains("checksum mismatch for summary.json"));
+}
+
+#[test]
+fn evidence_compare_reports_verified_llama_metrics_in_json_and_human_forms() {
+    let (baseline, candidate) = comparison_fixtures();
+    let arguments = [
+        "evidence",
+        "compare",
+        baseline.to_str().expect("UTF-8 baseline"),
+        candidate.to_str().expect("UTF-8 candidate"),
+        "--json",
+    ];
+    let first = benchplane(&arguments);
+    let second = benchplane(&arguments);
+    assert!(first.status.success(), "{}", output_text(&first.stderr));
+    assert_eq!(
+        first.stdout, second.stdout,
+        "JSON output must be deterministic"
+    );
+    assert_eq!(
+        first.stdout.iter().filter(|byte| **byte == b'\n').count(),
+        1
+    );
+    let result: Value = serde_json::from_slice(&first.stdout).expect("comparison JSON");
+    assert_eq!(result["format"], "benchplane-evidence-comparison/v1");
+    assert_eq!(result["compatible"], true);
+    assert_eq!(
+        result["measurementContract"]["generator"],
+        "benchplane-llama-cpp-smollm2/v2"
+    );
+    assert_eq!(result["requests"]["baselineCount"], 6);
+    assert_eq!(result["requests"]["candidateCount"], 6);
+    assert_eq!(result["repetitions"]["baselineCount"], 3);
+    assert_eq!(result["repetitions"]["candidateCount"], 3);
+    assert_eq!(result["attemptResources"]["unit"], "helperProcessLifetime");
+    assert!(
+        result["requests"]["latencyMicros"]["mean"]["delta"]["absoluteDelta"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(result["environment"]
+        .as_array()
+        .expect("environment list")
+        .iter()
+        .any(|field| {
+            field["field"] == "platform.operatingSystem.distribution"
+                && field["relationship"] == "unknown"
+        }));
+
+    let human = benchplane(&[
+        "evidence",
+        "compare",
+        baseline.to_str().expect("UTF-8 baseline"),
+        candidate.to_str().expect("UTF-8 candidate"),
+    ]);
+    assert!(human.status.success(), "{}", output_text(&human.stderr));
+    let stdout = output_text(&human.stdout);
+    for expected in [
+        "measurement compatible: yes",
+        "measured requests: baseline=6 candidate=6",
+        "request latency p95 (µs):",
+        "request TTFT p95 (µs):",
+        "measured repetitions: baseline=3 candidate=3",
+        "repetition aggregate TTFT mean (µs):",
+        "whole-helper CPU time (µs):",
+        "whole-helper peak RSS (bytes):",
+        "Descriptive only:",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in {stdout}"
+        );
+    }
+}
+
+#[test]
+fn evidence_compare_identical_metrics_have_zero_deltas_and_invalid_input_is_rejected() {
+    let (baseline, _) = comparison_fixtures();
+    let identical = benchplane(&[
+        "evidence",
+        "compare",
+        baseline.to_str().expect("UTF-8 baseline"),
+        baseline.to_str().expect("UTF-8 baseline"),
+        "--json",
+    ]);
+    assert!(
+        identical.status.success(),
+        "{}",
+        output_text(&identical.stderr)
+    );
+    let result: Value = serde_json::from_slice(&identical.stdout).expect("comparison JSON");
+    assert_eq!(
+        result["requests"]["latencyMicros"]["mean"]["delta"]["absoluteDelta"],
+        0
+    );
+    assert_eq!(
+        result["attemptResources"]["peakRssBytes"]["delta"]["absoluteDelta"],
+        0
+    );
+
+    let temporary = TestDirectory::new("comparison-invalid-candidate");
+    let invalid = temporary
+        .path
+        .join(baseline.file_name().expect("bundle directory name"));
+    copy_directory(&baseline, &invalid);
+    fs::write(invalid.join("summary.json"), b"{}\n").expect("tamper summary");
+    let rejected = benchplane(&[
+        "evidence",
+        "compare",
+        baseline.to_str().expect("UTF-8 baseline"),
+        invalid.to_str().expect("UTF-8 candidate"),
+    ]);
+    assert_eq!(rejected.status.code(), Some(5));
+    assert!(output_text(&rejected.stderr).contains("candidate evidence bundle is invalid"));
+    assert!(rejected.stdout.is_empty());
 }
 
 #[test]
