@@ -1643,6 +1643,49 @@ mod tests {
         .expect("write summary");
     }
 
+    fn rewrite_run_identity(directory: &mut TestDirectory, run_id: &str) {
+        let root = &directory.path;
+        for relative in [
+            "manifest.json",
+            "run.json",
+            "attempts/0001/attempt.json",
+            "attempts/0001/provenance.json",
+            "attempts/0001/resources.json",
+            "validity.json",
+            "summary.json",
+        ] {
+            let path = root.join(relative);
+            let mut record: serde_json::Value = serde_json::from_slice(
+                &fs::read(&path).unwrap_or_else(|error| panic!("read {relative}: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("parse {relative}: {error}"));
+            record["runId"] = serde_json::Value::String(run_id.to_owned());
+            fs::write(
+                &path,
+                serde_json::to_vec_pretty(&record)
+                    .unwrap_or_else(|error| panic!("serialize {relative}: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("write {relative}: {error}"));
+        }
+
+        let mut events_bytes = Vec::new();
+        for line in fs::read_to_string(root.join("events.jsonl"))
+            .expect("read events")
+            .lines()
+        {
+            let mut event: serde_json::Value = serde_json::from_str(line).expect("parse event");
+            event["runId"] = serde_json::Value::String(run_id.to_owned());
+            serde_json::to_writer(&mut events_bytes, &event).expect("serialize event");
+            events_bytes.push(b'\n');
+        }
+        fs::write(root.join("events.jsonl"), events_bytes).expect("write events");
+
+        let renamed = directory.cleanup_root.join(run_id);
+        fs::rename(root, &renamed).expect("rename bundle directory");
+        directory.path = renamed;
+        rewrite_checksums(&directory.path);
+    }
+
     #[test]
     fn verifies_the_checked_in_fixture() {
         let manifest = verify_evidence_bundle(&fixture_root()).expect("fixture should verify");
@@ -1677,7 +1720,8 @@ mod tests {
     #[test]
     fn compares_verified_current_llama_bundles_from_raw_measured_values() {
         let baseline = llama_fixture("comparison-baseline", LLAMA_CPP_GENERATOR_VERSION);
-        let candidate = llama_fixture("comparison-candidate", LLAMA_CPP_GENERATOR_VERSION);
+        let mut candidate = llama_fixture("comparison-candidate", LLAMA_CPP_GENERATOR_VERSION);
+        rewrite_run_identity(&mut candidate, "run-018f6f9a-7b3c-7abc-8def-111111111111");
         let mut records = read_measurements(&candidate.path);
         for observation in &mut records[0].request_observations {
             observation.latency_micros = 9_000;
@@ -1706,7 +1750,10 @@ mod tests {
         .expect("parse provenance");
         provenance.platform.cpu.model = Some("Different Example CPU".to_owned());
         write_provenance(&candidate.path, &provenance);
-        let mut resources = valid_resources();
+        let mut resources: AttemptResources = serde_json::from_slice(
+            &fs::read(candidate.path.join("attempts/0001/resources.json")).expect("read resources"),
+        )
+        .expect("parse resources");
         resources.cpu_time_micros = 24_690;
         resources.peak_rss_bytes = 8_388_608;
         write_resources(&candidate.path, &resources);
@@ -1783,7 +1830,8 @@ mod tests {
     #[test]
     fn comparison_rejects_historical_llama_v1_and_invalid_evidence() {
         let historical = llama_fixture("comparison-v1", LLAMA_CPP_GENERATOR_VERSION_V1);
-        let current = llama_fixture("comparison-v2", LLAMA_CPP_GENERATOR_VERSION);
+        let mut current = llama_fixture("comparison-v2", LLAMA_CPP_GENERATOR_VERSION);
+        rewrite_run_identity(&mut current, "run-018f6f9a-7b3c-7abc-8def-222222222222");
         let error = crate::comparison::compare_evidence_bundles(&historical.path, &current.path)
             .expect_err("v1 is not eligible");
         assert!(error.to_string().contains("requires current request-level"));
@@ -1797,9 +1845,39 @@ mod tests {
     }
 
     #[test]
+    fn comparison_rejects_the_same_verified_run_at_any_path() {
+        let baseline = llama_fixture("comparison-same-run", LLAMA_CPP_GENERATOR_VERSION);
+        let direct_error =
+            crate::comparison::compare_evidence_bundles(&baseline.path, &baseline.path)
+                .expect_err("one bundle cannot be compared with itself");
+        assert!(matches!(
+            direct_error,
+            crate::comparison::ComparisonError::SameRun
+        ));
+
+        let mut copied = TestDirectory::new("comparison-same-run-copy");
+        copied.path = copied
+            .cleanup_root
+            .join(baseline.path.file_name().expect("bundle directory name"));
+        copy_directory(&baseline.path, &copied.path);
+        let copied_error =
+            crate::comparison::compare_evidence_bundles(&baseline.path, &copied.path)
+                .expect_err("copying a bundle does not create a distinct run");
+        assert!(matches!(
+            copied_error,
+            crate::comparison::ComparisonError::SameRun
+        ));
+        assert_eq!(
+            copied_error.to_string(),
+            "baseline and candidate must be distinct Benchplane runs"
+        );
+    }
+
+    #[test]
     fn comparison_reports_concrete_measurement_contract_mismatches() {
         let baseline = llama_fixture("comparison-compatible-plan", LLAMA_CPP_GENERATOR_VERSION);
-        let candidate = llama_fixture("comparison-different-plan", LLAMA_CPP_GENERATOR_VERSION);
+        let mut candidate = llama_fixture("comparison-different-plan", LLAMA_CPP_GENERATOR_VERSION);
+        rewrite_run_identity(&mut candidate, "run-018f6f9a-7b3c-7abc-8def-333333333333");
         let mut plan: ResolvedExperiment = serde_json::from_slice(
             &fs::read(candidate.path.join("resolved-plan.json")).expect("read plan"),
         )

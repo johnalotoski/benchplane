@@ -23,6 +23,8 @@ pub enum ComparisonError {
     },
     #[error("{role} evidence bundle is not comparison-eligible: {reason}")]
     Ineligible { role: &'static str, reason: String },
+    #[error("baseline and candidate must be distinct Benchplane runs")]
+    SameRun,
 }
 
 pub fn compare_evidence_bundles(
@@ -41,6 +43,9 @@ pub fn compare_evidence_bundles(
             source,
         }
     })?;
+    if baseline.manifest.run_id == candidate.manifest.run_id {
+        return Err(ComparisonError::SameRun);
+    }
 
     let baseline_contract = eligible_contract("baseline", &baseline)?;
     let candidate_contract = eligible_contract("candidate", &candidate)?;
@@ -476,6 +481,13 @@ mod tests {
 
     #[test]
     fn deterministic_integer_deltas_and_undefined_zero_baseline_percentage() {
+        assert_eq!(
+            compare_metric(100, 100).delta,
+            IntegerDelta {
+                absolute_delta: 0,
+                percentage_delta_milli_percent: Some(0),
+            }
+        );
         assert_eq!(
             compare_metric(100, 125).delta,
             IntegerDelta {

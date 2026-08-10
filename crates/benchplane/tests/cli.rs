@@ -477,35 +477,41 @@ fn evidence_compare_reports_verified_llama_metrics_in_json_and_human_forms() {
 }
 
 #[test]
-fn evidence_compare_identical_metrics_have_zero_deltas_and_invalid_input_is_rejected() {
-    let (baseline, _) = comparison_fixtures();
-    let identical = benchplane(&[
+fn evidence_compare_rejects_same_run_identity_and_invalid_input() {
+    let (baseline, candidate) = comparison_fixtures();
+    let same_path = benchplane(&[
         "evidence",
         "compare",
         baseline.to_str().expect("UTF-8 baseline"),
         baseline.to_str().expect("UTF-8 baseline"),
         "--json",
     ]);
-    assert!(
-        identical.status.success(),
-        "{}",
-        output_text(&identical.stderr)
-    );
-    let result: Value = serde_json::from_slice(&identical.stdout).expect("comparison JSON");
-    assert_eq!(
-        result["requests"]["latencyMicros"]["mean"]["delta"]["absoluteDelta"],
-        0
-    );
-    assert_eq!(
-        result["attemptResources"]["peakRssBytes"]["delta"]["absoluteDelta"],
-        0
-    );
+    assert_eq!(same_path.status.code(), Some(5));
+    assert!(output_text(&same_path.stderr)
+        .contains("baseline and candidate must be distinct Benchplane runs"));
+    assert!(same_path.stdout.is_empty());
+
+    let same_run_copy_root = TestDirectory::new("comparison-same-run-copy");
+    let same_run_copy = same_run_copy_root
+        .path
+        .join(baseline.file_name().expect("bundle directory name"));
+    copy_directory(&baseline, &same_run_copy);
+    let copied = benchplane(&[
+        "evidence",
+        "compare",
+        baseline.to_str().expect("UTF-8 baseline"),
+        same_run_copy.to_str().expect("UTF-8 copied bundle"),
+    ]);
+    assert_eq!(copied.status.code(), Some(5));
+    assert!(output_text(&copied.stderr)
+        .contains("baseline and candidate must be distinct Benchplane runs"));
+    assert!(copied.stdout.is_empty());
 
     let temporary = TestDirectory::new("comparison-invalid-candidate");
     let invalid = temporary
         .path
-        .join(baseline.file_name().expect("bundle directory name"));
-    copy_directory(&baseline, &invalid);
+        .join(candidate.file_name().expect("bundle directory name"));
+    copy_directory(&candidate, &invalid);
     fs::write(invalid.join("summary.json"), b"{}\n").expect("tamper summary");
     let rejected = benchplane(&[
         "evidence",

@@ -438,18 +438,27 @@
             "$bundle/attempts/0001/resources.json" > /dev/null
           grep -F '  attempts/0001/resources.json' "$bundle/SHA256SUMS" > /dev/null
           ${benchplane}/bin/benchplane evidence verify "$bundle" > verified.txt
-          ${benchplane}/bin/benchplane evidence compare "$bundle" "$bundle" --json \
-            > comparison.json
+          fixtureBundle="$TMPDIR/run-019fe9ab-efa8-7d31-b631-25ab14491fb8"
+          mkdir "$fixtureBundle"
+          cp -R \
+            ${../../tests/fixtures/evidence-compare/run-019fe9ab-efa8-7d31-b631-25ab14491fb8}/. \
+            "$fixtureBundle/"
+          ${benchplane}/bin/benchplane evidence compare \
+            "$bundle" \
+            "$fixtureBundle" \
+            --json > comparison.json
           ${pkgs.jq}/bin/jq -e \
             '.format == "benchplane-evidence-comparison/v1" and
              .compatible == true and
+             .baseline.runId != .candidate.runId and
              .requests.baselineCount == 6 and .requests.candidateCount == 6 and
              .repetitions.baselineCount == 3 and .repetitions.candidateCount == 3 and
-             .requests.latencyMicros.mean.delta.absoluteDelta == 0 and
-             .repetitions.meanThroughputMilliRequestsPerSecond.delta.absoluteDelta == 0 and
+             (.requests.latencyMicros.mean.delta.absoluteDelta | type == "number") and
+             (.repetitions.meanThroughputMilliRequestsPerSecond.delta.absoluteDelta |
+               type == "number") and
              .attemptResources.unit == "helperProcessLifetime" and
-             .attemptResources.cpuTimeMicros.delta.absoluteDelta == 0 and
-             .attemptResources.peakRssBytes.delta.absoluteDelta == 0' \
+             (.attemptResources.cpuTimeMicros.delta.absoluteDelta | type == "number") and
+             (.attemptResources.peakRssBytes.delta.absoluteDelta | type == "number")' \
             comparison.json > /dev/null
           mkdir $out
           cp "$resultFile" $out/result.json
