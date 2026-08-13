@@ -1600,7 +1600,7 @@ mod tests {
                     "deviceName": "Test NVIDIA GPU",
                     "logicalDeviceIndex": 0,
                     "totalVramBytes": 8589934592_u64,
-                    "nvidiaDriverVersion": "610.43.03",
+                    "nvidiaDriverVersion": "575.57.08",
                     "cudaDriverVersion": "13.0",
                     "cudaRuntimeVersion": "13.0",
                     "cudaToolkitVersion": "13.0",
@@ -2061,7 +2061,7 @@ mod tests {
                         .nvidia
                         .as_mut()
                         .expect("NVIDIA facts")
-                        .nvidia_driver_version = "595.84".to_owned()
+                        .nvidia_driver_version = "575.57.07".to_owned()
                 }
                 "compute-capability" => {
                     backend

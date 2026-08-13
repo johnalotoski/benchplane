@@ -39,9 +39,9 @@ constexpr int kModelInitExit = 20;
 constexpr int kInferenceExit = 21;
 #ifdef BENCHPLANE_TARGET_NVIDIA_CUDA
 constexpr const char * kNvidiaMetadataFormat = "benchplane-llama-cpp-nvidia/v1";
-constexpr uint32_t kMinimumNvidiaDriverMajor = 610;
-constexpr uint32_t kMinimumNvidiaDriverMinor = 43;
-constexpr uint32_t kMinimumNvidiaDriverPatch = 3;
+constexpr uint32_t kMinimumNvidiaDriverMajor = 575;
+constexpr uint32_t kMinimumNvidiaDriverMinor = 57;
+constexpr uint32_t kMinimumNvidiaDriverPatch = 8;
 #endif
 
 struct Args {
@@ -159,13 +159,12 @@ constexpr bool nvidia_driver_version_supported(std::string_view value) {
          patch >= kMinimumNvidiaDriverPatch);
 }
 
-static_assert(nvidia_driver_version_supported("610.43.03"));
-static_assert(nvidia_driver_version_supported("610.43.4"));
-static_assert(nvidia_driver_version_supported("611.0"));
-static_assert(!nvidia_driver_version_supported("610.43"));
-static_assert(!nvidia_driver_version_supported("610.43.02"));
-static_assert(!nvidia_driver_version_supported("595.84"));
-static_assert(!nvidia_driver_version_supported("610.43.03.1"));
+static_assert(nvidia_driver_version_supported("575.57.08"));
+static_assert(nvidia_driver_version_supported("575.57.9"));
+static_assert(nvidia_driver_version_supported("595.84"));
+static_assert(!nvidia_driver_version_supported("575.57"));
+static_assert(!nvidia_driver_version_supported("575.57.07"));
+static_assert(!nvidia_driver_version_supported("575.57.08.1"));
 static_assert(!nvidia_driver_version_supported("not-a-version"));
 
 std::string cuda_version(int version) {
@@ -485,7 +484,7 @@ int main(int argc, char ** argv) {
     }
     const std::string nvidia_driver_version = bounded_driver_version();
     if (!nvidia_driver_version_supported(nvidia_driver_version)) {
-        std::fputs("host NVIDIA driver must be 610.43.03 or newer\n", stderr);
+        std::fputs("host NVIDIA driver must be 575.57.08 or newer\n", stderr);
         return kModelInitExit;
     }
 #endif

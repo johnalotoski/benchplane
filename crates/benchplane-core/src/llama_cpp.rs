@@ -314,7 +314,7 @@ mod tests {
                 "deviceName": "Test NVIDIA GPU",
                 "logicalDeviceIndex": 0,
                 "totalVramBytes": 8589934592_u64,
-                "nvidiaDriverVersion": "610.43.03",
+                "nvidiaDriverVersion": "575.57.08",
                 "cudaDriverVersion": "13.0",
                 "cudaRuntimeVersion": "13.0",
                 "cudaToolkitVersion": "13.0",
@@ -355,7 +355,7 @@ mod tests {
 
         let mut old_driver: serde_json::Value =
             serde_json::from_slice(&nvidia_metadata()).expect("parse NVIDIA metadata");
-        old_driver["nvidia"]["nvidiaDriverVersion"] = serde_json::json!("595.84");
+        old_driver["nvidia"]["nvidiaDriverVersion"] = serde_json::json!("575.57.07");
         assert!(parse_nvidia_metadata(
             &serde_json::to_vec(&old_driver).expect("serialize old-driver metadata")
         )

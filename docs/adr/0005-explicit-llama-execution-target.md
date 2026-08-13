@@ -12,6 +12,6 @@ Keep device and offload policy outside experiment control. The NVIDIA helper sel
 
 ## Consequences
 
-One resolved experiment can no longer silently change between CPU and CUDA according to the installed package or host. Unsupported package/platform combinations reject before run allocation; a missing, malformed, older-than-610.43.03, or otherwise unusable host driver/device fails through the allocated runtime lifecycle. The helper checks that driver floor before backend/CUDA initialization. The host NVIDIA driver/device interface remains a mutable dependency outside the Nix closure.
+One resolved experiment can no longer silently change between CPU and CUDA according to the installed package or host. Unsupported package/platform combinations reject before run allocation; a missing, malformed, older-than-575.57.08, or otherwise unusable host driver/device fails through the allocated runtime lifecycle. The helper checks that conservative native CUDA 12.9 Update 1 driver floor before backend/CUDA initialization. The host NVIDIA driver/device interface remains a mutable dependency outside the Nix closure.
 
 The design deliberately provides no arbitrary GPU index, multi-GPU split, backend selector, offload control, accelerator abstraction, GPU telemetry, or CPU-versus-GPU speedup analysis. Ordinary CI can prove schema, package, no-fallback, provenance/verifier/comparison, and NixOS policy behavior without claiming real CUDA execution; hardware acceptance remains an explicit host procedure.

@@ -577,7 +577,7 @@
               test -x ${benchplaneNvidiaCuda}/bin/benchplane-llama-cpp-nvidia-cuda
               ${pkgs.binutils}/bin/strings \
                 ${benchplaneNvidiaCuda}/bin/benchplane-llama-cpp-nvidia-cuda \
-                | grep -F 'host NVIDIA driver must be 610.43.03 or newer' > /dev/null
+                | grep -F 'host NVIDIA driver must be 575.57.08 or newer' > /dev/null
               backendCount=0
               sawCuda=0
               sawCpu=0

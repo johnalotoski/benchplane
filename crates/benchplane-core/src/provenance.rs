@@ -22,7 +22,7 @@ const MAX_CPUINFO_SCAN_BYTES: u64 = 256 * 1024;
 const MAX_KERNEL_FILE_BYTES: u64 = 4 * 1024;
 const MAX_PLATFORM_VALUE_BYTES: usize = 256;
 const MAX_NIX_STORE_PATH_BYTES: usize = 512;
-const MIN_NVIDIA_DRIVER_VERSION: (u32, u32, u32) = (610, 43, 3);
+const MIN_NVIDIA_DRIVER_VERSION: (u32, u32, u32) = (575, 57, 8);
 
 pub(crate) fn nvidia_driver_version_supported(value: &str) -> bool {
     let mut components = value.split('.');
@@ -280,18 +280,17 @@ mod tests {
 
     #[test]
     fn nvidia_driver_version_has_a_strict_supported_boundary() {
-        for version in ["610.43.03", "610.43.4", "611.0"] {
+        for version in ["575.57.08", "575.57.9", "595.84"] {
             assert!(nvidia_driver_version_supported(version), "{version}");
         }
         for version in [
-            "610.43",
-            "610.43.02",
-            "595.84",
-            "610",
-            "610.43.03.1",
+            "575.57",
+            "575.57.07",
+            "575",
+            "575.57.08.1",
             "not-a-version",
             "4294967296.0.0",
-            " 610.43.03",
+            " 575.57.08",
         ] {
             assert!(!nvidia_driver_version_supported(version), "{version}");
         }
