@@ -103,6 +103,7 @@ fn validate_accepts_all_tagged_yaml_examples() {
         "experiments/smoke/local-fake.yaml",
         "experiments/smoke/local-cpu-probe.yaml",
         "experiments/smoke/local-llama-cpp.yaml",
+        "experiments/examples/local-llama-cpp-nvidia-cuda.yaml",
         "experiments/examples/vllm-single-gpu.yaml",
     ] {
         let path = repository_root().join(relative);
@@ -231,6 +232,10 @@ fn validate_rejects_required_invalid_fixtures() {
         ),
         ("invalid/llama-cpp-wrong-model.yaml", "requires model"),
         (
+            "invalid/llama-cpp-invalid-target.yaml",
+            "unknown variant `arbitraryGpu`",
+        ),
+        (
             "invalid/llama-cpp-wrong-profile.yaml",
             "requires workload.profile",
         ),
@@ -354,6 +359,21 @@ fn llama_cpp_resolution_is_deterministic_and_materializes_fixed_identity() {
     assert_eq!(
         resolved["experiment"]["spec"]["workload"]["profile"],
         "smollm2-chat-greedy-v1"
+    );
+    assert!(resolved["experiment"]["spec"]["runtime"]
+        .get("target")
+        .is_none());
+
+    let nvidia = fixture("valid/minimal-llama-cpp-nvidia-cuda.yaml");
+    let nvidia = benchplane(&[
+        "resolve",
+        nvidia.to_str().expect("UTF-8 NVIDIA fixture path"),
+    ]);
+    assert!(nvidia.status.success(), "{}", output_text(&nvidia.stderr));
+    let nvidia: Value = serde_json::from_slice(&nvidia.stdout).expect("resolved NVIDIA JSON");
+    assert_eq!(
+        nvidia["experiment"]["spec"]["runtime"]["target"],
+        "nvidiaCuda"
     );
 }
 

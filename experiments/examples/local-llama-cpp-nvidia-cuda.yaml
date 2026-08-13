@@ -1,0 +1,23 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: local-llama-cpp-nvidia-cuda
+spec:
+  provider:
+    kind: local
+  runtime:
+    kind: llamaCpp
+    target: nvidiaCuda
+    model: smollm2-135m-instruct-q2-k-v1
+    outputTokens: 4
+  workload:
+    profile: smollm2-chat-greedy-v1
+    requests: 2
+    concurrency: 1
+  measurement:
+    warmupRuns: 1
+    repetitions: 3
+  budget:
+    maximumCostUsd: 0
+  lifecycle:
+    maximumRuntimeSeconds: 120

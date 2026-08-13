@@ -42,6 +42,7 @@ pub(crate) fn execute(
             ExecutionOutput {
                 measurements,
                 resources: None,
+                nvidia_gpu: None,
                 terminal_state: RunState::Succeeded,
                 failure: None,
             }
@@ -49,6 +50,7 @@ pub(crate) fn execute(
         LocalFakeScenario::RuntimeFailure => ExecutionOutput {
             measurements,
             resources: None,
+            nvidia_gpu: None,
             terminal_state: RunState::Failed,
             failure: Some(FailureRecord {
                 phase: "running".to_owned(),
@@ -61,6 +63,7 @@ pub(crate) fn execute(
         LocalFakeScenario::Interrupted => ExecutionOutput {
             measurements,
             resources: None,
+            nvidia_gpu: None,
             terminal_state: RunState::Interrupted,
             failure: Some(FailureRecord {
                 phase: "running".to_owned(),

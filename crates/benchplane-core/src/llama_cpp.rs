@@ -3,19 +3,23 @@
 use crate::{
     child_supervisor::{self, ChildExecution, ChildProtocol, ExitCodeFailure},
     execution::ExecutionOutput,
+    provenance::nvidia_driver_version_supported,
 };
 use benchplane_schema::{
-    FailureRecord, MeasurementPhase, MeasurementRecord, RunState,
-    ERROR_LLAMA_CPP_DEADLINE_EXCEEDED, ERROR_LLAMA_CPP_EXIT_FAILED,
+    FailureRecord, LlamaCppTarget, MeasurementPhase, MeasurementRecord, NvidiaGpuProvenance,
+    RunState, ERROR_LLAMA_CPP_DEADLINE_EXCEEDED, ERROR_LLAMA_CPP_EXIT_FAILED,
     ERROR_LLAMA_CPP_MODEL_INIT_FAILED, ERROR_LLAMA_CPP_OUTPUT_INVALID,
     ERROR_LLAMA_CPP_RESOURCE_ACCOUNTING_FAILED, ERROR_LLAMA_CPP_SPAWN_FAILED,
     LLAMA_CPP_GENERATOR_VERSION, MAX_LLAMA_CPP_RECORDS, MAX_LLAMA_CPP_REQUEST_OBSERVATIONS,
 };
+use serde::Deserialize;
 use std::{path::Path, process::Command};
 
 const MAX_SERIALIZED_RECORD_BYTES: usize = 16 * 1024;
-const MAX_STDOUT_BYTES: usize = 256 * 1024;
+// One NVIDIA metadata preamble plus the maximum 16 repetition records.
+const MAX_STDOUT_BYTES: usize = 17 * MAX_SERIALIZED_RECORD_BYTES;
 const MODEL_INIT_EXIT_CODE: i32 = 20;
+const NVIDIA_METADATA_FORMAT: &str = "benchplane-llama-cpp-nvidia/v1";
 const SPECIAL_EXIT_CODES: &[ExitCodeFailure] = &[ExitCodeFailure {
     exit_code: MODEL_INIT_EXIT_CODE,
     failure_code: ERROR_LLAMA_CPP_MODEL_INIT_FAILED,
@@ -24,6 +28,7 @@ const SPECIAL_EXIT_CODES: &[ExitCodeFailure] = &[ExitCodeFailure {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LlamaCppConfig {
+    pub target: LlamaCppTarget,
     pub requests: u32,
     pub warmup_runs: u32,
     pub repetitions: u32,
@@ -38,10 +43,54 @@ pub(crate) fn execute(executable: &Path, config: LlamaCppConfig) -> ExecutionOut
     // the packaged executable/library boundary or measured work. The helper also
     // passes its compiled package-owned directory to ggml's explicit-path loader.
     command.env_clear();
-    into_execution_output(execute_command(command, config))
+    into_execution_output(execute_command(command, config), config)
 }
 
-fn into_execution_output(result: ChildExecution) -> ExecutionOutput {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NvidiaMetadataRecord {
+    format: String,
+    nvidia: NvidiaGpuProvenance,
+}
+
+fn into_execution_output(result: ChildExecution, config: LlamaCppConfig) -> ExecutionOutput {
+    if result.failure.is_none() {
+        let nvidia_gpu = match config.target {
+            LlamaCppTarget::Cpu if result.metadata.is_empty() => None,
+            LlamaCppTarget::NvidiaCuda if result.metadata.len() == 1 => {
+                match parse_nvidia_metadata(&result.metadata[0]) {
+                    Ok(metadata) => Some(metadata),
+                    Err(message) => {
+                        return ExecutionOutput {
+                            measurements: Vec::new(),
+                            resources: result.resources,
+                            nvidia_gpu: None,
+                            terminal_state: RunState::Failed,
+                            failure: Some(protocol_failure(&message)),
+                        };
+                    }
+                }
+            }
+            _ => {
+                return ExecutionOutput {
+                    measurements: Vec::new(),
+                    resources: result.resources,
+                    nvidia_gpu: None,
+                    terminal_state: RunState::Failed,
+                    failure: Some(protocol_failure(
+                        "llama.cpp helper metadata does not match the requested target",
+                    )),
+                };
+            }
+        };
+        return ExecutionOutput {
+            measurements: result.measurements,
+            resources: result.resources,
+            nvidia_gpu,
+            terminal_state: RunState::Succeeded,
+            failure: None,
+        };
+    }
     let terminal_state = if result.failure.is_none() {
         RunState::Succeeded
     } else {
@@ -50,9 +99,51 @@ fn into_execution_output(result: ChildExecution) -> ExecutionOutput {
     ExecutionOutput {
         measurements: result.measurements,
         resources: result.resources,
+        nvidia_gpu: None,
         terminal_state,
         failure: result.failure,
     }
+}
+
+fn parse_nvidia_metadata(bytes: &[u8]) -> Result<NvidiaGpuProvenance, String> {
+    let record: NvidiaMetadataRecord = serde_json::from_slice(bytes)
+        .map_err(|error| format!("llama.cpp helper emitted malformed NVIDIA metadata: {error}"))?;
+    let gpu = record.nvidia;
+    let bounded = |value: &str| {
+        !value.is_empty()
+            && value.trim() == value
+            && value.len() <= 256
+            && !value.chars().any(char::is_control)
+    };
+    let compute_capability_valid =
+        gpu.compute_capability
+            .split_once('.')
+            .is_some_and(|(major, minor)| {
+                !major.is_empty()
+                    && !minor.is_empty()
+                    && major.bytes().all(|byte| byte.is_ascii_digit())
+                    && minor.bytes().all(|byte| byte.is_ascii_digit())
+            });
+    if record.format != NVIDIA_METADATA_FORMAT
+        || gpu.vendor != "NVIDIA"
+        || !bounded(&gpu.device_name)
+        || gpu.logical_device_index != 0
+        || gpu.total_vram_bytes == 0
+        || !bounded(&gpu.nvidia_driver_version)
+        || !nvidia_driver_version_supported(&gpu.nvidia_driver_version)
+        || !bounded(&gpu.cuda_driver_version)
+        || !bounded(&gpu.cuda_runtime_version)
+        || !bounded(&gpu.cuda_toolkit_version)
+        || !compute_capability_valid
+        || gpu.offload.policy != "singleDeviceAllLayers"
+        || gpu.offload.total_layers == 0
+        || gpu.offload.offloaded_layers != gpu.offload.total_layers
+    {
+        return Err(
+            "llama.cpp helper NVIDIA metadata is inconsistent with the fixed target".to_owned(),
+        );
+    }
+    Ok(gpu)
 }
 
 fn execute_command(mut command: Command, config: LlamaCppConfig) -> ChildExecution {
@@ -74,6 +165,7 @@ fn execute_command(mut command: Command, config: LlamaCppConfig) -> ChildExecuti
         command,
         ChildProtocol {
             runtime_name: "llama.cpp SmolLM2",
+            expected_metadata_records: usize::from(config.target == LlamaCppTarget::NvidiaCuda),
             expected_records,
             max_record_bytes: MAX_SERIALIZED_RECORD_BYTES,
             max_stdout_bytes: MAX_STDOUT_BYTES,
@@ -168,7 +260,7 @@ fn protocol_failure(message: &str) -> FailureRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benchplane_schema::RequestObservation;
+    use benchplane_schema::{ProcessResources, RequestObservation};
     use std::{
         fs,
         path::PathBuf,
@@ -178,6 +270,7 @@ mod tests {
 
     fn config() -> LlamaCppConfig {
         LlamaCppConfig {
+            target: LlamaCppTarget::Cpu,
             requests: 2,
             warmup_runs: 1,
             repetitions: 2,
@@ -213,6 +306,82 @@ mod tests {
         }
     }
 
+    fn nvidia_metadata() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "format": NVIDIA_METADATA_FORMAT,
+            "nvidia": {
+                "vendor": "NVIDIA",
+                "deviceName": "Test NVIDIA GPU",
+                "logicalDeviceIndex": 0,
+                "totalVramBytes": 8589934592_u64,
+                "nvidiaDriverVersion": "610.43.03",
+                "cudaDriverVersion": "13.0",
+                "cudaRuntimeVersion": "13.0",
+                "cudaToolkitVersion": "13.0",
+                "computeCapability": "8.9",
+                "offload": {
+                    "policy": "singleDeviceAllLayers",
+                    "offloadedLayers": 31,
+                    "totalLayers": 31
+                }
+            }
+        }))
+        .expect("serialize NVIDIA metadata")
+    }
+
+    #[test]
+    fn nvidia_success_requires_bounded_complete_metadata() {
+        let mut gpu_config = config();
+        gpu_config.target = LlamaCppTarget::NvidiaCuda;
+        let successful = ChildExecution {
+            metadata: vec![nvidia_metadata()],
+            measurements: vec![record(MeasurementPhase::Measured, 1)],
+            resources: Some(ProcessResources {
+                cpu_time_micros: 1,
+                peak_rss_bytes: 1024,
+            }),
+            failure: None,
+        };
+        let output = into_execution_output(successful, gpu_config);
+        assert_eq!(output.terminal_state, RunState::Succeeded);
+        assert_eq!(
+            output
+                .nvidia_gpu
+                .expect("NVIDIA provenance")
+                .offload
+                .offloaded_layers,
+            31
+        );
+
+        let mut old_driver: serde_json::Value =
+            serde_json::from_slice(&nvidia_metadata()).expect("parse NVIDIA metadata");
+        old_driver["nvidia"]["nvidiaDriverVersion"] = serde_json::json!("595.84");
+        assert!(parse_nvidia_metadata(
+            &serde_json::to_vec(&old_driver).expect("serialize old-driver metadata")
+        )
+        .is_err());
+
+        for metadata in [Vec::new(), vec![b"{}".to_vec()]] {
+            let invalid = ChildExecution {
+                metadata,
+                measurements: vec![record(MeasurementPhase::Measured, 1)],
+                resources: Some(ProcessResources {
+                    cpu_time_micros: 1,
+                    peak_rss_bytes: 1024,
+                }),
+                failure: None,
+            };
+            let output = into_execution_output(invalid, gpu_config);
+            assert_eq!(output.terminal_state, RunState::Failed);
+            assert!(output.measurements.is_empty());
+            assert!(output.resources.is_some());
+            assert_eq!(
+                output.failure.expect("protocol failure").code,
+                ERROR_LLAMA_CPP_OUTPUT_INVALID
+            );
+        }
+    }
+
     #[test]
     fn validates_identity_order_metrics_and_counts() {
         assert!(validate_record(&record(MeasurementPhase::Warmup, 1), 0, config()).is_ok());
@@ -245,6 +414,7 @@ mod tests {
         assert!(serialized.len() < MAX_SERIALIZED_RECORD_BYTES);
 
         let maximum = LlamaCppConfig {
+            target: LlamaCppTarget::Cpu,
             requests: MAX_LLAMA_CPP_REQUEST_OBSERVATIONS as u32,
             warmup_runs: 0,
             repetitions: 1,
@@ -252,6 +422,9 @@ mod tests {
             maximum_runtime_seconds: 1,
         };
         assert_eq!(expected_record_count(maximum).expect("maximum fits"), 1);
+        assert!(
+            (MAX_LLAMA_CPP_RECORDS as usize + 1) * MAX_SERIALIZED_RECORD_BYTES <= MAX_STDOUT_BYTES
+        );
         let mut excessive = maximum;
         excessive.requests += 1;
         assert!(expected_record_count(excessive).is_err());
@@ -396,7 +569,7 @@ fn main() {
             ("partial-nonzero", ERROR_LLAMA_CPP_EXIT_FAILED),
             ("partial-malformed", ERROR_LLAMA_CPP_OUTPUT_INVALID),
         ] {
-            let output = into_execution_output(injected(mode));
+            let output = into_execution_output(injected(mode), config());
             assert_eq!(output.terminal_state, RunState::Failed, "mode={mode}");
             assert!(output.measurements.is_empty(), "mode={mode}");
             assert_eq!(output.failure.expect("failure").code, code, "mode={mode}");
@@ -413,7 +586,7 @@ fn main() {
     #[test]
     fn deadline_terminates_and_reaps_child() {
         let started = Instant::now();
-        let output = into_execution_output(injected("deadline"));
+        let output = into_execution_output(injected("deadline"), config());
         assert_eq!(output.terminal_state, RunState::Failed);
         assert!(output.measurements.is_empty());
         assert_eq!(

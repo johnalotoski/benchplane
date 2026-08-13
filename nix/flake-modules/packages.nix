@@ -3,6 +3,11 @@
   perSystem =
     { pkgs, system, ... }:
     let
+      cudaSupported = system == "x86_64-linux";
+      cudaPkgs = import inputs.nixpkgs {
+        inherit system;
+        config.allowUnfree = true;
+      };
       source = inputs.nixpkgs.lib.fileset.toSource {
         root = ../..;
         fileset = inputs.nixpkgs.lib.fileset.unions [
@@ -29,6 +34,20 @@
         metalSupport = false;
         rpcSupport = false;
       };
+
+      llamaCppCuda =
+        if cudaSupported then
+          cudaPkgs.llama-cpp.override {
+            cudaSupport = true;
+            cudaPackages = cudaPkgs.cudaPackages;
+            rocmSupport = false;
+            openclSupport = false;
+            vulkanSupport = false;
+            metalSupport = false;
+            rpcSupport = false;
+          }
+        else
+          null;
 
       ambientBackendSentinel =
         pkgs.runCommand "benchplane-ambient-ggml-backend-sentinel"
@@ -66,54 +85,108 @@
         '';
       };
 
-      benchplaneRust = pkgs.rustPlatform.buildRustPackage {
-        pname = "benchplane";
-        version = "0.1.0";
-        src = source;
+      llamaCppCudaHelper =
+        if cudaSupported then
+          cudaPkgs.cudaPackages.backendStdenv.mkDerivation {
+            pname = "benchplane-llama-cpp-nvidia-cuda-helper";
+            version = "1";
+            dontUnpack = true;
+            buildInputs = [
+              cudaPkgs.cudaPackages.cuda_cudart
+              cudaPkgs.cudaPackages.cuda_nvcc
+            ];
+            buildPhase = ''
+              runHook preBuild
+              $CXX -std=c++17 -O2 -Wall -Wextra -Werror \
+                -DBENCHPLANE_TARGET_NVIDIA_CUDA=1 \
+                -DBENCHPLANE_MODEL_PATH='"${smolLm2Model}"' \
+                -DBENCHPLANE_BACKEND_PATH='"${llamaCppCuda}/bin"' \
+                -I${llamaCppCuda.dev}/include \
+                -I${cudaPkgs.cudaPackages.cuda_cudart}/include \
+                -I${cudaPkgs.cudaPackages.cuda_nvcc}/include \
+                -L${llamaCppCuda}/lib -Wl,-rpath,${llamaCppCuda}/lib \
+                -L${cudaPkgs.cudaPackages.cuda_cudart}/lib \
+                ${../packages/benchplane-llama-cpp.cpp} \
+                -lllama -lggml -lggml-base -lcudart -pthread \
+                -o benchplane-llama-cpp-nvidia-cuda
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 benchplane-llama-cpp-nvidia-cuda \
+                $out/bin/benchplane-llama-cpp-nvidia-cuda
+              runHook postInstall
+            '';
+          }
+        else
+          null;
 
-        cargoLock.lockFile = ../../Cargo.lock;
+      mkBenchplaneRust =
+        cudaEnabled:
+        pkgs.rustPlatform.buildRustPackage {
+          pname = if cudaEnabled then "benchplane-nvidia-cuda" else "benchplane";
+          version = "0.1.0";
+          src = source;
 
-        env = {
-          BENCHPLANE_LLAMA_CPP_NIX_STORE_PATH = toString llamaCppCpu;
-          BENCHPLANE_SMOLLM2_NIX_STORE_PATH = toString smolLm2Model;
+          cargoLock.lockFile = ../../Cargo.lock;
+
+          env = {
+            BENCHPLANE_LLAMA_CPP_NIX_STORE_PATH = toString llamaCppCpu;
+            BENCHPLANE_SMOLLM2_NIX_STORE_PATH = toString smolLm2Model;
+            BENCHPLANE_LLAMA_CPP_CUDA_AVAILABLE = if cudaEnabled then "1" else "0";
+          }
+          // inputs.nixpkgs.lib.optionalAttrs cudaEnabled {
+            BENCHPLANE_LLAMA_CPP_CUDA_NIX_STORE_PATH = toString llamaCppCuda;
+          };
+
+          meta = {
+            description = "Reproducible AI systems experiments, from specification to evidence";
+            homepage = "https://github.com/johnalotoski/benchplane";
+            license = inputs.nixpkgs.lib.licenses.asl20;
+            mainProgram = "benchplane";
+          };
         };
 
-        meta = {
-          description = "Reproducible AI systems experiments, from specification to evidence";
-          homepage = "https://github.com/johnalotoski/benchplane";
-          license = inputs.nixpkgs.lib.licenses.asl20;
-          mainProgram = "benchplane";
+      mkBenchplane =
+        rustPackage: cudaEnabled:
+        pkgs.symlinkJoin {
+          name = if cudaEnabled then "benchplane-nvidia-cuda-0.1.0" else "benchplane-0.1.0";
+          paths = [
+            rustPackage
+            llamaCppHelper
+          ]
+          ++ inputs.nixpkgs.lib.optionals cudaEnabled [ llamaCppCudaHelper ];
+          postBuild = ''
+            # `current_exe` must remain inside this combined package so sibling
+            # helper discovery cannot resolve back through a symlink to the Rust-only output.
+            cp --remove-destination ${rustPackage}/bin/benchplane $out/bin/benchplane
+            cp --remove-destination ${rustPackage}/bin/benchplane-cpu-probe $out/bin/benchplane-cpu-probe
+            cp --remove-destination ${llamaCppHelper}/bin/benchplane-llama-cpp $out/bin/benchplane-llama-cpp
+            ${inputs.nixpkgs.lib.optionalString cudaEnabled ''
+              cp --remove-destination \
+                ${llamaCppCudaHelper}/bin/benchplane-llama-cpp-nvidia-cuda \
+                $out/bin/benchplane-llama-cpp-nvidia-cuda
+            ''}
+            mkdir -p $out/share/benchplane/models
+            ln -s ${smolLm2Model} $out/share/benchplane/models/SmolLM2-135M-Instruct.Q2_K.gguf
+            install -Dm444 ${../packages/THIRD_PARTY_NOTICES.md} \
+              $out/share/doc/benchplane/THIRD_PARTY_NOTICES.md
+            install -Dm444 ${../../LICENSE} \
+              $out/share/licenses/benchplane/Apache-2.0.txt
+            install -Dm444 ${../../NOTICE} $out/share/doc/benchplane/NOTICE
+          '';
+          meta = rustPackage.meta // {
+            # Benchplane and the model are Apache-2.0; llama.cpp is MIT.
+            license = with inputs.nixpkgs.lib.licenses; [
+              asl20
+              mit
+            ];
+          };
         };
-      };
 
-      benchplane = pkgs.symlinkJoin {
-        name = "benchplane-0.1.0";
-        paths = [
-          benchplaneRust
-          llamaCppHelper
-        ];
-        postBuild = ''
-          # `current_exe` must remain inside this combined package so sibling
-          # helper discovery cannot resolve back through a symlink to the Rust-only output.
-          cp --remove-destination ${benchplaneRust}/bin/benchplane $out/bin/benchplane
-          cp --remove-destination ${benchplaneRust}/bin/benchplane-cpu-probe $out/bin/benchplane-cpu-probe
-          cp --remove-destination ${llamaCppHelper}/bin/benchplane-llama-cpp $out/bin/benchplane-llama-cpp
-          mkdir -p $out/share/benchplane/models
-          ln -s ${smolLm2Model} $out/share/benchplane/models/SmolLM2-135M-Instruct.Q2_K.gguf
-          install -Dm444 ${../packages/THIRD_PARTY_NOTICES.md} \
-            $out/share/doc/benchplane/THIRD_PARTY_NOTICES.md
-          install -Dm444 ${../../LICENSE} \
-            $out/share/licenses/benchplane/Apache-2.0.txt
-          install -Dm444 ${../../NOTICE} $out/share/doc/benchplane/NOTICE
-        '';
-        meta = benchplaneRust.meta // {
-          # Benchplane and the model are Apache-2.0; llama.cpp is MIT.
-          license = with inputs.nixpkgs.lib.licenses; [
-            asl20
-            mit
-          ];
-        };
-      };
+      benchplaneRust = mkBenchplaneRust false;
+      benchplane = mkBenchplane benchplaneRust false;
+      benchplaneNvidiaCuda = if cudaSupported then mkBenchplane (mkBenchplaneRust true) true else null;
 
       evaluationExperiment = pkgs.writeText "benchplane-module-evaluation-experiment.yaml" ''
         apiVersion: benchplane/v1alpha1
@@ -146,6 +219,31 @@
           }
         ];
       };
+
+      evaluatedNvidiaModule =
+        if cudaSupported then
+          inputs.nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              ../modules/nixos/default.nix
+              ../modules/nixos/nvidia.nix
+              {
+                nixpkgs.config.allowUnfree = true;
+                services.benchplane = {
+                  enable = true;
+                  runner = {
+                    enable = true;
+                    package = benchplaneNvidiaCuda;
+                    experimentFile = evaluationExperiment;
+                  };
+                  nvidia.enable = true;
+                };
+                system.stateVersion = "26.05";
+              }
+            ];
+          }
+        else
+          null;
 
       invalidRunnerEvaluation =
         runnerConfiguration: lifecycleConfiguration:
@@ -203,7 +301,13 @@
       runnerService = evaluatedModule.config.systemd.services.benchplane-runner;
     in
     {
-      packages.default = benchplane;
+      packages = {
+        default = benchplane;
+        inherit benchplane;
+      }
+      // inputs.nixpkgs.lib.optionalAttrs cudaSupported {
+        benchplane-nvidia-cuda = benchplaneNvidiaCuda;
+      };
 
       checks = {
         inherit benchplane;
@@ -465,6 +569,102 @@
           cp verified.txt $out/
           cp comparison.json $out/
         '';
+      }
+      // inputs.nixpkgs.lib.optionalAttrs cudaSupported {
+        llama-cpp-nvidia-cuda-package-assets =
+          pkgs.runCommand "benchplane-llama-cpp-nvidia-cuda-package-assets" { }
+            ''
+              test -x ${benchplaneNvidiaCuda}/bin/benchplane-llama-cpp-nvidia-cuda
+              ${pkgs.binutils}/bin/strings \
+                ${benchplaneNvidiaCuda}/bin/benchplane-llama-cpp-nvidia-cuda \
+                | grep -F 'host NVIDIA driver must be 610.43.03 or newer' > /dev/null
+              backendCount=0
+              sawCuda=0
+              sawCpu=0
+              for backend in ${llamaCppCuda}/bin/libggml-*.so; do
+                backendCount=$((backendCount + 1))
+                case "$(basename "$backend")" in
+                  libggml-cuda.so) sawCuda=1 ;;
+                  libggml-blas.so|libggml-cpu*.so) sawCpu=1 ;;
+                  *)
+                    echo "unexpected ggml backend in CUDA package: $backend" >&2
+                    exit 1
+                    ;;
+                esac
+              done
+              test "$backendCount" -gt 0
+              test "$sawCuda" = 1
+              test "$sawCpu" = 1
+              cudaRpath="$(${pkgs.patchelf}/bin/patchelf --print-rpath \
+                ${llamaCppCuda}/bin/libggml-cuda.so)"
+              case ":$cudaRpath:" in
+                *":/run/opengl-driver/lib:"*) ;;
+                *)
+                  echo "CUDA backend lacks the fixed NixOS host-driver lookup path" >&2
+                  exit 1
+                  ;;
+              esac
+
+              ambientCwd="$TMPDIR/ambient-backend"
+              mkdir "$ambientCwd"
+              ln -s ${ambientBackendSentinel}/lib/libggml-cuda.so \
+                "$ambientCwd/libggml-cuda.so"
+              set +e
+              (
+                cd "$ambientCwd"
+                GGML_BACKEND_PATH="$ambientCwd/libggml-cuda.so" \
+                  GGML_CUDA_DEVICES=99 \
+                  CUDA_VISIBLE_DEVICES=99 \
+                  CUDA_DEVICE_ORDER=PCI_BUS_ID \
+                  ${benchplaneNvidiaCuda}/bin/benchplane-llama-cpp-nvidia-cuda \
+                    --requests 1 --warmup-runs 0 --repetitions 1 --output-tokens 1 \
+                    > "$TMPDIR/helper-out" 2> "$TMPDIR/helper-err"
+              )
+              helperStatus=$?
+              set -e
+              # Nix builds expose no NVIDIA device. The helper must fail at its
+              # bounded model/backend initialization boundary, not load the
+              # hostile sentinel (86) or silently execute on CPU (0).
+              test "$helperStatus" = 20
+              test ! -s "$TMPDIR/helper-out"
+
+              set +e
+              ${benchplaneNvidiaCuda}/bin/benchplane run \
+                ${../../experiments/examples/local-llama-cpp-nvidia-cuda.yaml} \
+                --output-root "$TMPDIR/gpu-output" --json > "$TMPDIR/gpu-result.json"
+              runStatus=$?
+              set -e
+              test "$runStatus" = 4
+              bundle="$(${pkgs.jq}/bin/jq -er '.bundlePath' "$TMPDIR/gpu-result.json")"
+              ${pkgs.jq}/bin/jq -e \
+                '.runState == "failed" and .validityStatus == "indeterminate" and
+                 .failure.code == "llamaCpp.modelInitFailed"' \
+                "$TMPDIR/gpu-result.json" > /dev/null
+              ${benchplaneNvidiaCuda}/bin/benchplane evidence verify "$bundle" > /dev/null
+              touch $out
+            '';
+
+        nixos-nvidia-module-evaluation =
+          let
+            nvidiaRunner = evaluatedNvidiaModule.config.systemd.services.benchplane-runner;
+            nvidiaUser =
+              evaluatedNvidiaModule.config.users.users.${evaluatedNvidiaModule.config.services.benchplane.user};
+          in
+          pkgs.runCommand "benchplane-nixos-nvidia-module-evaluation"
+            {
+              devicePolicy = nvidiaRunner.serviceConfig.DevicePolicy;
+              deviceAllow = builtins.concatStringsSep "|" nvidiaRunner.serviceConfig.DeviceAllow;
+              extraGroups = builtins.concatStringsSep "|" nvidiaUser.extraGroups;
+            }
+            ''
+              test "$devicePolicy" = closed
+              case "|$deviceAllow|" in *"|/dev/nvidia0 rw|"*) ;; *) exit 1 ;; esac
+              case "|$deviceAllow|" in *"|/dev/nvidiactl rw|"*) ;; *) exit 1 ;; esac
+              case "|$deviceAllow|" in *"|/dev/nvidia-uvm rw|"*) ;; *) exit 1 ;; esac
+              case "|$extraGroups|" in *"|video|"*) ;; *) exit 1 ;; esac
+              case "|$extraGroups|" in *"|render|"*) ;; *) exit 1 ;; esac
+              touch $out
+            '';
       };
     };
 }

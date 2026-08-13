@@ -2,10 +2,11 @@
 
 use benchplane_schema::{
     AttemptProvenance, BackendProvenance, CpuProvenance, DeviceClass, KernelProvenance,
-    ModelProvenance, OperatingSystemProvenance, PlatformProvenance, ResolvedExperiment,
-    RuntimeProvenance, RuntimeSpec, SoftwareComponentProvenance, SoftwareProvenance,
-    ATTEMPT_PROVENANCE_FORMAT_V1, BENCHPLANE_SOFTWARE_NAME, CPU_PROBE_GENERATOR_VERSION,
-    LLAMA_CPP_BACKEND_IDENTITY, LLAMA_CPP_ENGINE_NAME, LLAMA_CPP_ENGINE_VERSION,
+    LlamaCppTarget, ModelProvenance, NvidiaGpuProvenance, OperatingSystemProvenance,
+    PlatformProvenance, ResolvedExperiment, RuntimeProvenance, RuntimeSpec,
+    SoftwareComponentProvenance, SoftwareProvenance, ATTEMPT_PROVENANCE_FORMAT_V1,
+    BENCHPLANE_SOFTWARE_NAME, CPU_PROBE_GENERATOR_VERSION, LLAMA_CPP_BACKEND_IDENTITY,
+    LLAMA_CPP_CUDA_BACKEND_IDENTITY, LLAMA_CPP_ENGINE_NAME, LLAMA_CPP_ENGINE_VERSION,
     LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_MODEL_SHA256, LOCAL_FAKE_GENERATOR_VERSION,
 };
 use std::{
@@ -21,6 +22,31 @@ const MAX_CPUINFO_SCAN_BYTES: u64 = 256 * 1024;
 const MAX_KERNEL_FILE_BYTES: u64 = 4 * 1024;
 const MAX_PLATFORM_VALUE_BYTES: usize = 256;
 const MAX_NIX_STORE_PATH_BYTES: usize = 512;
+const MIN_NVIDIA_DRIVER_VERSION: (u32, u32, u32) = (610, 43, 3);
+
+pub(crate) fn nvidia_driver_version_supported(value: &str) -> bool {
+    let mut components = value.split('.');
+    let Some(major) = components
+        .next()
+        .and_then(|component| component.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    let Some(minor) = components
+        .next()
+        .and_then(|component| component.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    let patch = match components.next() {
+        Some(component) => match component.parse::<u32>() {
+            Ok(component) => component,
+            Err(_) => return false,
+        },
+        None => 0,
+    };
+    components.next().is_none() && (major, minor, patch) >= MIN_NVIDIA_DRIVER_VERSION
+}
 
 pub(crate) fn capture(run_id: &str, plan: &ResolvedExperiment) -> AttemptProvenance {
     let runtime = match &plan.experiment.spec.runtime {
@@ -30,14 +56,17 @@ pub(crate) fn capture(run_id: &str, plan: &ResolvedExperiment) -> AttemptProvena
         RuntimeSpec::CpuProbe { .. } => RuntimeProvenance::CpuProbe {
             generator: CPU_PROBE_GENERATOR_VERSION.to_owned(),
         },
-        RuntimeSpec::LlamaCpp { model, .. } => RuntimeProvenance::LlamaCpp {
+        RuntimeSpec::LlamaCpp { target, model, .. } => RuntimeProvenance::LlamaCpp {
             generator: LLAMA_CPP_GENERATOR_VERSION.to_owned(),
             engine: SoftwareComponentProvenance {
                 name: LLAMA_CPP_ENGINE_NAME.to_owned(),
                 version: LLAMA_CPP_ENGINE_VERSION.to_owned(),
-                nix_store_path: compiled_nix_store_path(option_env!(
-                    "BENCHPLANE_LLAMA_CPP_NIX_STORE_PATH"
-                )),
+                nix_store_path: compiled_nix_store_path(match target {
+                    LlamaCppTarget::Cpu => option_env!("BENCHPLANE_LLAMA_CPP_NIX_STORE_PATH"),
+                    LlamaCppTarget::NvidiaCuda => {
+                        option_env!("BENCHPLANE_LLAMA_CPP_CUDA_NIX_STORE_PATH")
+                    }
+                }),
             },
             model: ModelProvenance {
                 identity: model.clone(),
@@ -46,13 +75,24 @@ pub(crate) fn capture(run_id: &str, plan: &ResolvedExperiment) -> AttemptProvena
                     "BENCHPLANE_SMOLLM2_NIX_STORE_PATH"
                 )),
             },
-            backend: BackendProvenance {
-                identity: LLAMA_CPP_BACKEND_IDENTITY.to_owned(),
-                device_class: DeviceClass::Cpu,
-                nix_store_path: compiled_nix_store_path(option_env!(
-                    "BENCHPLANE_LLAMA_CPP_NIX_STORE_PATH"
-                )),
-            },
+            backend: Box::new(BackendProvenance {
+                identity: match target {
+                    LlamaCppTarget::Cpu => LLAMA_CPP_BACKEND_IDENTITY,
+                    LlamaCppTarget::NvidiaCuda => LLAMA_CPP_CUDA_BACKEND_IDENTITY,
+                }
+                .to_owned(),
+                device_class: match target {
+                    LlamaCppTarget::Cpu => DeviceClass::Cpu,
+                    LlamaCppTarget::NvidiaCuda => DeviceClass::NvidiaCuda,
+                },
+                nix_store_path: compiled_nix_store_path(match target {
+                    LlamaCppTarget::Cpu => option_env!("BENCHPLANE_LLAMA_CPP_NIX_STORE_PATH"),
+                    LlamaCppTarget::NvidiaCuda => {
+                        option_env!("BENCHPLANE_LLAMA_CPP_CUDA_NIX_STORE_PATH")
+                    }
+                }),
+                nvidia: None,
+            }),
         },
         RuntimeSpec::Vllm { .. } => {
             unreachable!("unsupported runtime is rejected before provenance capture")
@@ -105,6 +145,21 @@ pub(crate) fn capture(run_id: &str, plan: &ResolvedExperiment) -> AttemptProvena
             },
             runtime,
         },
+    }
+}
+
+pub(crate) fn attach_nvidia(
+    provenance: &mut AttemptProvenance,
+    nvidia: NvidiaGpuProvenance,
+) -> Result<(), &'static str> {
+    match &mut provenance.software.runtime {
+        RuntimeProvenance::LlamaCpp { backend, .. }
+            if backend.device_class == DeviceClass::NvidiaCuda && backend.nvidia.is_none() =>
+        {
+            backend.nvidia = Some(Box::new(nvidia));
+            Ok(())
+        }
+        _ => Err("NVIDIA execution provenance does not match the prepared runtime"),
     }
 }
 
@@ -222,6 +277,25 @@ fn nix_store_object(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::{Cursor, Error};
+
+    #[test]
+    fn nvidia_driver_version_has_a_strict_supported_boundary() {
+        for version in ["610.43.03", "610.43.4", "611.0"] {
+            assert!(nvidia_driver_version_supported(version), "{version}");
+        }
+        for version in [
+            "610.43",
+            "610.43.02",
+            "595.84",
+            "610",
+            "610.43.03.1",
+            "not-a-version",
+            "4294967296.0.0",
+            " 610.43.03",
+        ] {
+            assert!(!nvidia_driver_version_supported(version), "{version}");
+        }
+    }
 
     struct ErrorAfterChunk(Cursor<Vec<u8>>);
 

@@ -144,6 +144,7 @@ struct RunServices<'a> {
     hook: &'a dyn RunHook,
     cpu_probe_executable: Option<&'a Path>,
     llama_cpp_executable: Option<&'a Path>,
+    llama_cpp_cuda_executable: Option<&'a Path>,
 }
 
 pub fn run_experiment(
@@ -162,6 +163,7 @@ pub fn run_experiment(
             hook: &hook,
             cpu_probe_executable: None,
             llama_cpp_executable: None,
+            llama_cpp_cuda_executable: None,
         },
     )
 }
@@ -253,7 +255,7 @@ fn run_experiment_with_services(
             ),
             "preparing",
         )?;
-        let provenance = provenance::capture(&run_id, &plan);
+        let mut provenance = provenance::capture(&run_id, &plan);
         at(
             write_json_atomic(
                 &attempt_directory.join("provenance.json"),
@@ -297,13 +299,31 @@ fn run_experiment_with_services(
                 cpu_probe::execute(&executable, config)
             }
             ExecutionKind::LlamaCpp(config) => {
-                let executable = services
-                    .llama_cpp_executable
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(packaged_llama_cpp_executable);
+                let executable = match config.target {
+                    benchplane_schema::LlamaCppTarget::Cpu => services
+                        .llama_cpp_executable
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(packaged_llama_cpp_executable),
+                    benchplane_schema::LlamaCppTarget::NvidiaCuda => services
+                        .llama_cpp_cuda_executable
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(packaged_llama_cpp_cuda_executable),
+                };
                 llama_cpp::execute(&executable, config)
             }
         };
+        if let Some(nvidia) = execution.nvidia_gpu.clone() {
+            provenance::attach_nvidia(&mut provenance, nvidia)
+                .expect("successful NVIDIA metadata matches the prepared target");
+            at(
+                write_json_atomic(
+                    &attempt_directory.join("provenance.json"),
+                    &provenance,
+                    "attempt provenance",
+                ),
+                "recordingProvenance",
+            )?;
+        }
         let attempt_terminal = match execution.terminal_state {
             RunState::Succeeded => AttemptStatus::Succeeded,
             RunState::Failed => AttemptStatus::Failed,
@@ -573,23 +593,44 @@ fn execution_kind(plan: &ResolvedExperiment) -> Result<ExecutionKind, RunError> 
         })),
         (
             ProviderSpec::Local,
-            RuntimeSpec::LlamaCpp { output_tokens, .. },
-        ) => Ok(ExecutionKind::LlamaCpp(LlamaCppConfig {
-            requests: plan.experiment.spec.workload.requests,
-            warmup_runs: plan.experiment.spec.measurement.warmup_runs,
-            repetitions: plan.experiment.spec.measurement.repetitions,
-            output_tokens: *output_tokens,
-            maximum_runtime_seconds: plan
-                .experiment
-                .spec
-                .lifecycle
-                .maximum_runtime_seconds,
-        })),
+            RuntimeSpec::LlamaCpp {
+                target,
+                output_tokens,
+                ..
+            },
+        ) => {
+            if *target == benchplane_schema::LlamaCppTarget::NvidiaCuda
+                && !cuda_package_available()
+            {
+                return Err(RunError::UnsupportedCombination {
+                    code: ERROR_EXECUTION_UNSUPPORTED_COMBINATION,
+                    message: "runtime llamaCpp target nvidiaCuda requires the supported x86_64-linux CUDA package"
+                        .to_owned(),
+                });
+            }
+            Ok(ExecutionKind::LlamaCpp(LlamaCppConfig {
+                target: *target,
+                requests: plan.experiment.spec.workload.requests,
+                warmup_runs: plan.experiment.spec.measurement.warmup_runs,
+                repetitions: plan.experiment.spec.measurement.repetitions,
+                output_tokens: *output_tokens,
+                maximum_runtime_seconds: plan
+                    .experiment
+                    .spec
+                    .lifecycle
+                    .maximum_runtime_seconds,
+            }))
+        }
         _ => Err(RunError::UnsupportedCombination {
             code: ERROR_EXECUTION_UNSUPPORTED_COMBINATION,
             message: "executable combinations are provider localFake with runtime localFake, provider local with runtime cpuProbe, and provider local with runtime llamaCpp".to_owned(),
         }),
     }
+}
+
+fn cuda_package_available() -> bool {
+    cfg!(all(target_os = "linux", target_arch = "x86_64"))
+        && option_env!("BENCHPLANE_LLAMA_CPP_CUDA_AVAILABLE") == Some("1")
 }
 
 fn packaged_cpu_probe_executable() -> PathBuf {
@@ -612,6 +653,19 @@ fn packaged_llama_cpp_executable() -> PathBuf {
                 .map(|directory| directory.join("benchplane-llama-cpp"))
         })
         .unwrap_or_else(|| PathBuf::from("/benchplane-package-missing/bin/benchplane-llama-cpp"))
+}
+
+fn packaged_llama_cpp_cuda_executable() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| {
+            executable
+                .parent()
+                .map(|directory| directory.join("benchplane-llama-cpp-nvidia-cuda"))
+        })
+        .unwrap_or_else(|| {
+            PathBuf::from("/benchplane-package-missing/bin/benchplane-llama-cpp-nvidia-cuda")
+        })
 }
 
 fn persist_run_transition(
@@ -950,6 +1004,7 @@ mod tests {
                 hook,
                 cpu_probe_executable: None,
                 llama_cpp_executable: None,
+                llama_cpp_cuda_executable: None,
             },
         )
     }
@@ -1164,6 +1219,7 @@ mod tests {
                 hook: &NoopRunHook,
                 cpu_probe_executable: Some(&unspawnable),
                 llama_cpp_executable: None,
+                llama_cpp_cuda_executable: None,
             },
         )
         .expect("runtime failure should finalize");
@@ -1204,6 +1260,7 @@ mod tests {
                 hook: &NoopRunHook,
                 cpu_probe_executable: Some(&exits_nonzero),
                 llama_cpp_executable: None,
+                llama_cpp_cuda_executable: None,
             },
         )
         .expect("runtime failure should finalize");
@@ -1241,6 +1298,7 @@ mod tests {
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
                 llama_cpp_executable: Some(&unspawnable),
+                llama_cpp_cuda_executable: None,
             },
         )
         .expect("runtime failure should finalize");
@@ -1409,10 +1467,34 @@ mod tests {
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
                 llama_cpp_executable: None,
+                llama_cpp_cuda_executable: None,
             },
         )
         .expect_err("unsupported combination should be rejected");
         assert!(error.is_request_rejection());
+
+        if !cuda_package_available() {
+            let gpu = b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: unsupported-gpu }\nspec:\n  provider: { kind: local }\n  runtime: { kind: llamaCpp, target: nvidiaCuda }\n  workload: { profile: smollm2-chat-greedy-v1, requests: 1 }\n  budget: { maximumCostUsd: 0 }\n";
+            let gpu_directory = TestDirectory::new("unsupported-gpu");
+            let error = run_experiment_with_services(
+                gpu,
+                &RunOptions {
+                    output_root: gpu_directory.0.clone(),
+                },
+                &RunServices {
+                    clock: &FixedClock,
+                    ids: &PanickingIds,
+                    hook: &NoopRunHook,
+                    cpu_probe_executable: None,
+                    llama_cpp_executable: None,
+                    llama_cpp_cuda_executable: None,
+                },
+            )
+            .expect_err("unpackaged GPU target should reject before allocation");
+            assert!(error.is_request_rejection());
+            assert!(!gpu_directory.0.join("staging").exists());
+            assert!(!gpu_directory.0.join("runs").exists());
+        }
     }
 
     #[test]
@@ -1437,6 +1519,7 @@ mod tests {
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
                 llama_cpp_executable: None,
+                llama_cpp_cuda_executable: None,
             },
         )
         .expect_err("excessive work should be rejected");
@@ -1466,6 +1549,7 @@ mod tests {
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
                 llama_cpp_executable: None,
+                llama_cpp_cuda_executable: None,
             },
         )
         .expect_err("excessive work should be rejected");
@@ -1495,6 +1579,7 @@ mod tests {
                 hook: &NoopRunHook,
                 cpu_probe_executable: None,
                 llama_cpp_executable: None,
+                llama_cpp_cuda_executable: None,
             },
         )
         .expect_err("excessive records should be rejected");

@@ -12,6 +12,7 @@ pub const LLAMA_CPP_ENGINE_VERSION: &str = "b10133";
 pub const LLAMA_CPP_MODEL_SHA256: &str =
     "sha256:55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75";
 pub const LLAMA_CPP_BACKEND_IDENTITY: &str = "nixpkgs-llama-cpp-cpu-only-dynamic/v1";
+pub const LLAMA_CPP_CUDA_BACKEND_IDENTITY: &str = "nixpkgs-llama-cpp-nvidia-cuda-dynamic/v1";
 
 pub const ERROR_LOCAL_FAKE_RUNTIME_FAILURE: &str = "localFake.runtimeFailure";
 pub const ERROR_LOCAL_FAKE_INTERRUPTED: &str = "localFake.interrupted";
@@ -228,7 +229,7 @@ pub enum RuntimeProvenance {
         generator: String,
         engine: SoftwareComponentProvenance,
         model: ModelProvenance,
-        backend: BackendProvenance,
+        backend: Box<BackendProvenance>,
     },
 }
 
@@ -246,12 +247,38 @@ pub struct BackendProvenance {
     pub identity: String,
     pub device_class: DeviceClass,
     pub nix_store_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvidia: Option<Box<NvidiaGpuProvenance>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum DeviceClass {
     Cpu,
+    NvidiaCuda,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NvidiaGpuProvenance {
+    pub vendor: String,
+    pub device_name: String,
+    pub logical_device_index: u32,
+    pub total_vram_bytes: u64,
+    pub nvidia_driver_version: String,
+    pub cuda_driver_version: String,
+    pub cuda_runtime_version: String,
+    pub cuda_toolkit_version: String,
+    pub compute_capability: String,
+    pub offload: NvidiaOffloadProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NvidiaOffloadProvenance {
+    pub policy: String,
+    pub offloaded_layers: u32,
+    pub total_layers: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -397,6 +424,7 @@ pub struct BundleIdentity {
 pub struct LlamaMeasurementContract {
     pub provider: String,
     pub runtime: String,
+    pub target: crate::LlamaCppTarget,
     pub generator: String,
     pub model: String,
     pub model_sha256: String,

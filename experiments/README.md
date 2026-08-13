@@ -6,4 +6,4 @@ Study-specific copies or overlays belong beneath the corresponding `studies/<id>
 
 Files under `examples/` may be illustrative rather than executable. Each such file must say so explicitly and identify any placeholder model, revision, workload profile, or infrastructure value.
 
-Files under `smoke/` are checked executable paths. `local-llama-cpp.yaml` is intentionally fixed to the package-owned SmolLM2 identity and `smollm2-chat-greedy-v1` profile; it cannot be repointed to a local path, URL, arbitrary model, or arbitrary prompt.
+Files under `smoke/` are checked executable paths. `local-llama-cpp.yaml` is intentionally fixed to the package-owned SmolLM2 identity, CPU-default target, and `smollm2-chat-greedy-v1` profile; it cannot be repointed to a local path, URL, arbitrary model, device, backend, or prompt. `examples/local-llama-cpp-nvidia-cuda.yaml` uses the same bounded workload with the explicit x86-64 NVIDIA target and requires real compatible hardware, so ordinary no-GPU CI validates/resolves it but does not execute it.

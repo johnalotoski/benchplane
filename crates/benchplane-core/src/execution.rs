@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use benchplane_schema::{
-    FailureRecord, LatencySummary, MeasurementPhase, MeasurementRecord, ProcessResources,
-    ResolvedExperiment, RunState, RunSummary, ValidityReason, ValidityResult, ValidityStatus,
+    FailureRecord, LatencySummary, MeasurementPhase, MeasurementRecord, NvidiaGpuProvenance,
+    ProcessResources, ResolvedExperiment, RunState, RunSummary, ValidityReason, ValidityResult,
+    ValidityStatus,
 };
 
 #[derive(Debug)]
 pub(crate) struct ExecutionOutput {
     pub measurements: Vec<MeasurementRecord>,
     pub resources: Option<ProcessResources>,
+    pub nvidia_gpu: Option<NvidiaGpuProvenance>,
     pub terminal_state: RunState,
     pub failure: Option<FailureRecord>,
 }

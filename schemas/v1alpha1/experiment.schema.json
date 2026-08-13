@@ -119,6 +119,13 @@
       },
       "additionalProperties": false
     },
+    "LlamaCppTarget": {
+      "type": "string",
+      "enum": [
+        "cpu",
+        "nvidiaCuda"
+      ]
+    },
     "LocalFakeScenario": {
       "type": "string",
       "enum": [
@@ -292,6 +299,9 @@
               "default": 4,
               "maximum": 32,
               "minimum": 1
+            },
+            "target": {
+              "$ref": "#/$defs/LlamaCppTarget"
             }
           },
           "additionalProperties": false,

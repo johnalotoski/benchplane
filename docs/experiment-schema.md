@@ -50,6 +50,7 @@ The real-model combination is provider `local` with runtime `llamaCpp`. It accep
 provider: { kind: local }
 runtime:
   kind: llamaCpp
+  target: cpu
   model: smollm2-135m-instruct-q2-k-v1
   outputTokens: 4
 workload:
@@ -58,9 +59,11 @@ workload:
   concurrency: 1
 ```
 
-`model` defaults to the fixed identity and `outputTokens` defaults to `4`; explicit values are retained in the resolved experiment. Generated tokens must be 1–32 and concurrency must equal `1`. Warmups plus measured repetitions may not exceed 16. The checked product `(warmups + repetitions) × requests × (96 maximum fixed-profile prompt tokens + outputTokens)` may not overflow or exceed 8,192 prompt-plus-generated tokens. That existing work ceiling also limits one successful execution to at most 84 numeric request observations; no enable/disable field is needed. Requests and repetitions must be positive, the lifecycle maximum remains 1–86,400 seconds, and the local budget must be finite and nonnegative. All semantic checks and provider/runtime compatibility selection occur before UUIDv7 allocation or output-root creation. The package-owned helper independently enforces the record, observation, output-token, prompt-token, and total-token bounds.
+`target` accepts only `cpu` or `nvidiaCuda` and defaults to `cpu`; the default is omitted from deterministic serialization to preserve existing CPU resolved-plan identities. The explicit NVIDIA target is executable only from the CUDA-bearing `x86_64-linux` package. It does not select a user GPU: the package-owned policy always uses logical CUDA device 0, no split mode, and all-layer offload. A package/platform that cannot contain this target rejects it before UUID/output allocation; a missing, malformed, or older-than-610.43.03 host driver or device unavailability discovered by the concrete helper follows the allocated failed-run path.
 
-No public field can select an executable, model path, model URL/repository/revision, prompt, environment, working directory, network address, sampler, thread count, or general llama.cpp option. Request-index variation is derived deterministically inside the fixed profile.
+`model` defaults to the fixed identity and `outputTokens` defaults to `4`; explicit values are retained in the resolved experiment. Generated tokens must be 1–32 and concurrency must equal `1`. Warmups plus measured repetitions may not exceed 16. The checked product `(warmups + repetitions) × requests × (96 maximum fixed-profile prompt tokens + outputTokens)` may not overflow or exceed 8,192 prompt-plus-generated tokens. That existing work ceiling also limits one successful execution to at most 84 numeric request observations; no enable/disable field is needed. Requests and repetitions must be positive, the lifecycle maximum remains 1–86,400 seconds, and the local budget must be finite and nonnegative. All semantic checks and provider/runtime compatibility selection occur before UUIDv7 allocation or output-root creation. Both package-owned helpers independently enforce the record, observation, output-token, prompt-token, and total-token bounds.
+
+No public field can select an executable, physical GPU/index, backend, offload count, CUDA path/environment, model path, model URL/repository/revision, prompt, working directory, network address, sampler, thread count, or general llama.cpp option. Request-index variation is derived deterministically inside the fixed profile.
 
 ## Structural and semantic restrictions
 
@@ -70,7 +73,7 @@ Benchplane semantic validation applies restrictions that are awkward or misleadi
 
 Consumers must not treat JSON Schema acceptance as a substitute for `benchplane validate`.
 
-Attempt provenance, supervised-helper resource accounting, and llama request observations are observed execution evidence, not workload configuration. They add no experiment field, enable/disable switch, threshold, budget, or sampling interval; the generated `benchplane/v1alpha1` experiment schema is unchanged by those evidence extensions.
+Attempt provenance, supervised-helper resource accounting, and llama request observations are observed execution evidence, not workload configuration. They add no enable/disable switch, threshold, budget, or sampling interval. The only new public control is the concrete llama execution `target`, because CPU and CUDA must never be selected silently by package/host state.
 
 ## Resolved-experiment digest
 

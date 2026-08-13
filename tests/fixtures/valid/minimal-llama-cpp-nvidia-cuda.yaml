@@ -1,0 +1,9 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: minimal-llama-cpp-nvidia-cuda
+spec:
+  provider: { kind: local }
+  runtime: { kind: llamaCpp, target: nvidiaCuda }
+  workload: { profile: smollm2-chat-greedy-v1, requests: 1 }
+  budget: { maximumCostUsd: 0 }
