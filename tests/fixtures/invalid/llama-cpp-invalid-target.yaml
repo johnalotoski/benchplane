@@ -1,0 +1,11 @@
+apiVersion: benchplane/v1alpha1
+kind: Experiment
+metadata:
+  name: llama-cpp-invalid-target
+spec:
+  provider: { kind: local }
+  runtime:
+    kind: llamaCpp
+    target: arbitraryGpu
+  workload: { profile: smollm2-chat-greedy-v1, requests: 1 }
+  budget: { maximumCostUsd: 0 }

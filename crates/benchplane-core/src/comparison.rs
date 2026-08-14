@@ -96,17 +96,18 @@ fn eligible_contract(
     {
         return ineligible(role, "requires a successful run with valid measurements");
     }
-    let (model, output_tokens) = match (
+    let (target, model, output_tokens) = match (
         &bundle.plan.experiment.spec.provider,
         &bundle.plan.experiment.spec.runtime,
     ) {
         (
             ProviderSpec::Local,
             RuntimeSpec::LlamaCpp {
+                target,
                 model,
                 output_tokens,
             },
-        ) => (model.clone(), *output_tokens),
+        ) => (*target, model.clone(), *output_tokens),
         _ => return ineligible(role, "requires the local llamaCpp runtime"),
     };
     if bundle
@@ -138,6 +139,7 @@ fn eligible_contract(
     Ok(LlamaMeasurementContract {
         provider: "local".to_owned(),
         runtime: "llamaCpp".to_owned(),
+        target,
         generator: generator.clone(),
         model,
         model_sha256: provenance_model.sha256.clone(),
@@ -175,6 +177,7 @@ fn contract_differences(
     }
     compare!(provider, "provider");
     compare!(runtime, "runtime");
+    compare!(target, "target");
     compare!(generator, "generator");
     compare!(model, "model");
     compare!(model_sha256, "modelSha256");
@@ -432,6 +435,73 @@ fn compare_environment(
                 candidate_backend.nix_store_path.as_ref(),
             ),
         ]);
+        match (&baseline_backend.nvidia, &candidate_backend.nvidia) {
+            (Some(baseline), Some(candidate)) => fields.extend([
+                environment_field(
+                    "software.runtime.backend.nvidia.deviceName",
+                    Some(&baseline.device_name),
+                    Some(&candidate.device_name),
+                ),
+                environment_field(
+                    "software.runtime.backend.nvidia.totalVramBytes",
+                    Some(&baseline.total_vram_bytes.to_string()),
+                    Some(&candidate.total_vram_bytes.to_string()),
+                ),
+                environment_field(
+                    "software.runtime.backend.nvidia.nvidiaDriverVersion",
+                    Some(&baseline.nvidia_driver_version),
+                    Some(&candidate.nvidia_driver_version),
+                ),
+                environment_field(
+                    "software.runtime.backend.nvidia.cudaDriverVersion",
+                    Some(&baseline.cuda_driver_version),
+                    Some(&candidate.cuda_driver_version),
+                ),
+                environment_field(
+                    "software.runtime.backend.nvidia.cudaRuntimeVersion",
+                    Some(&baseline.cuda_runtime_version),
+                    Some(&candidate.cuda_runtime_version),
+                ),
+                environment_field(
+                    "software.runtime.backend.nvidia.cudaToolkitVersion",
+                    Some(&baseline.cuda_toolkit_version),
+                    Some(&candidate.cuda_toolkit_version),
+                ),
+                environment_field(
+                    "software.runtime.backend.nvidia.computeCapability",
+                    Some(&baseline.compute_capability),
+                    Some(&candidate.compute_capability),
+                ),
+                environment_field(
+                    "software.runtime.backend.nvidia.offload",
+                    Some(&format!(
+                        "{}:{}/{}",
+                        baseline.offload.policy,
+                        baseline.offload.offloaded_layers,
+                        baseline.offload.total_layers
+                    )),
+                    Some(&format!(
+                        "{}:{}/{}",
+                        candidate.offload.policy,
+                        candidate.offload.offloaded_layers,
+                        candidate.offload.total_layers
+                    )),
+                ),
+            ]),
+            (Some(_), None) | (None, Some(_)) => fields.push(EnvironmentComparison {
+                field: "software.runtime.backend.nvidia".to_owned(),
+                baseline: baseline_backend
+                    .nvidia
+                    .as_ref()
+                    .map(|_| "present".to_owned()),
+                candidate: candidate_backend
+                    .nvidia
+                    .as_ref()
+                    .map(|_| "present".to_owned()),
+                relationship: EnvironmentRelationship::Unknown,
+            }),
+            (None, None) => {}
+        }
     }
     fields
 }
@@ -463,6 +533,7 @@ mod tests {
         LlamaMeasurementContract {
             provider: "local".to_owned(),
             runtime: "llamaCpp".to_owned(),
+            target: benchplane_schema::LlamaCppTarget::Cpu,
             generator: LLAMA_CPP_GENERATOR_VERSION.to_owned(),
             model: "model".to_owned(),
             model_sha256: "sha256:model".to_owned(),

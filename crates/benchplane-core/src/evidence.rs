@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::provenance::nvidia_driver_version_supported;
 use benchplane_schema::{
     AttemptProvenance, AttemptRecord, AttemptResources, AttemptStatus, DeviceClass,
     EvidenceManifest, LifecycleEvent, LocalFakeScenario, MeasurementPhase, MeasurementRecord,
     ProviderSpec, ResolvedExperiment, ResourceScope, RunRecord, RunState, RunSummary,
     RuntimeProvenance, RuntimeSpec, ValidityResult, ValidityStatus, ATTEMPT_PROVENANCE_FORMAT_V1,
     ATTEMPT_RESOURCES_FORMAT_V1, BENCHPLANE_SOFTWARE_NAME, CPU_PROBE_GENERATOR_VERSION,
-    EVIDENCE_FORMAT_V1, LLAMA_CPP_BACKEND_IDENTITY, LLAMA_CPP_ENGINE_NAME,
-    LLAMA_CPP_ENGINE_VERSION, LLAMA_CPP_GENERATOR_VERSION, LLAMA_CPP_GENERATOR_VERSION_V1,
-    LLAMA_CPP_MODEL_IDENTITY, LLAMA_CPP_MODEL_SHA256, LOCAL_FAKE_GENERATOR_VERSION,
+    EVIDENCE_FORMAT_V1, LLAMA_CPP_BACKEND_IDENTITY, LLAMA_CPP_CUDA_BACKEND_IDENTITY,
+    LLAMA_CPP_ENGINE_NAME, LLAMA_CPP_ENGINE_VERSION, LLAMA_CPP_GENERATOR_VERSION,
+    LLAMA_CPP_GENERATOR_VERSION_V1, LLAMA_CPP_MODEL_IDENTITY, LLAMA_CPP_MODEL_SHA256,
+    LOCAL_FAKE_GENERATOR_VERSION,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -27,6 +29,7 @@ const MAX_IDENTITY_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_ATTEMPT_PROVENANCE_BYTES: u64 = 16 * 1024;
 const MAX_ATTEMPT_RESOURCES_BYTES: u64 = 4 * 1024;
 const MAX_RESOLVED_PLAN_BYTES: u64 = 64 * 1024;
+const MAX_EXPERIMENT_BYTES: u64 = 64 * 1024;
 const MAX_MEASUREMENTS_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MEASUREMENT_LINE_BYTES: usize = 64 * 1024;
 const MAX_PROVENANCE_VALUE_BYTES: usize = 256;
@@ -114,6 +117,8 @@ pub enum EvidenceError {
     InvalidAttemptResources(String),
     #[error("invalid resolved plan: {0}")]
     InvalidResolvedPlan(String),
+    #[error("invalid original experiment: {0}")]
+    InvalidOriginalExperiment(String),
     #[error("invalid measurements: {0}")]
     InvalidMeasurements(String),
 }
@@ -486,6 +491,7 @@ fn retained_limit(relative: &str) -> Option<u64> {
         | "events.jsonl" => Some(MAX_IDENTITY_RECORD_BYTES),
         "attempts/0001/provenance.json" => Some(MAX_ATTEMPT_PROVENANCE_BYTES),
         "attempts/0001/resources.json" => Some(MAX_ATTEMPT_RESOURCES_BYTES),
+        "experiment.yaml" => Some(MAX_EXPERIMENT_BYTES),
         "resolved-plan.json" => Some(MAX_RESOLVED_PLAN_BYTES),
         _ => None,
     }
@@ -562,6 +568,7 @@ fn validate_record_consistency(
 
     let plan: ResolvedExperiment = parse_record(records, "resolved-plan.json")?;
     validate_resolved_plan(&plan, &manifest)?;
+    validate_original_experiment(records, &plan)?;
     let measurement_digest = verified_digests
         .get("attempts/0001/measurements.jsonl")
         .ok_or_else(|| {
@@ -703,6 +710,25 @@ fn validate_record_consistency(
         resources,
         measurements: measurement_validation.records,
     })
+}
+
+fn validate_original_experiment(
+    records: &BTreeMap<String, Vec<u8>>,
+    plan: &ResolvedExperiment,
+) -> Result<(), EvidenceError> {
+    let bytes = records
+        .get("experiment.yaml")
+        .ok_or_else(|| EvidenceError::MissingRequiredPayload("experiment.yaml".to_owned()))?;
+    let experiment = crate::parsing::parse_experiment(bytes)
+        .map_err(|error| EvidenceError::InvalidOriginalExperiment(error.to_string()))?;
+    let resolved = crate::resolution::resolve_experiment(experiment)
+        .map_err(|error| EvidenceError::InvalidOriginalExperiment(error.to_string()))?;
+    if &resolved != plan {
+        return Err(EvidenceError::InvalidOriginalExperiment(
+            "experiment.yaml does not deterministically reproduce resolved-plan.json".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 struct MeasurementValidation {
@@ -916,8 +942,10 @@ fn validate_measurement_record(
                 return invalid_measurements("cpuProbe measurement contract is not supported");
             }
         }
-        RuntimeSpec::LlamaCpp { .. } => match record.generator.as_str() {
-            LLAMA_CPP_GENERATOR_VERSION_V1 if record.request_observations.is_empty() => {}
+        RuntimeSpec::LlamaCpp { target, .. } => match record.generator.as_str() {
+            LLAMA_CPP_GENERATOR_VERSION_V1
+                if *target == benchplane_schema::LlamaCppTarget::Cpu
+                    && record.request_observations.is_empty() => {}
             LLAMA_CPP_GENERATOR_VERSION => {
                 if record.request_observations.len()
                     != plan.experiment.spec.workload.requests as usize
@@ -1108,6 +1136,7 @@ fn validate_attempt_provenance(
                 backend,
             },
             RuntimeSpec::LlamaCpp {
+                target,
                 model: resolved_model,
                 ..
             },
@@ -1120,10 +1149,33 @@ fn validate_attempt_provenance(
                 || model.identity != LLAMA_CPP_MODEL_IDENTITY
                 || &model.identity != resolved_model
                 || model.sha256 != LLAMA_CPP_MODEL_SHA256
-                || backend.identity != LLAMA_CPP_BACKEND_IDENTITY
-                || backend.device_class != DeviceClass::Cpu
+                || (*target == benchplane_schema::LlamaCppTarget::NvidiaCuda
+                    && generator != LLAMA_CPP_GENERATOR_VERSION)
             {
                 return invalid_provenance("llamaCpp software lineage is not supported");
+            }
+            match target {
+                benchplane_schema::LlamaCppTarget::Cpu
+                    if backend.identity == LLAMA_CPP_BACKEND_IDENTITY
+                        && backend.device_class == DeviceClass::Cpu
+                        && backend.nvidia.is_none() => {}
+                benchplane_schema::LlamaCppTarget::NvidiaCuda
+                    if backend.identity == LLAMA_CPP_CUDA_BACKEND_IDENTITY
+                        && backend.device_class == DeviceClass::NvidiaCuda =>
+                {
+                    if let Some(nvidia) = backend.nvidia.as_ref() {
+                        validate_nvidia_provenance(nvidia)?;
+                    } else if manifest.run_status == RunState::Succeeded {
+                        return invalid_provenance(
+                            "successful nvidiaCuda execution requires NVIDIA provenance",
+                        );
+                    }
+                }
+                _ => {
+                    return invalid_provenance(
+                        "llamaCpp backend does not match the resolved execution target",
+                    )
+                }
             }
             require_matching_generator(generator, measurement_generator)?;
             optional_nix_store_path(
@@ -1157,6 +1209,60 @@ fn validate_attempt_provenance(
             }
         }
         _ => return invalid_provenance("runtime kind does not match the resolved plan"),
+    }
+    Ok(())
+}
+
+fn validate_nvidia_provenance(
+    nvidia: &benchplane_schema::NvidiaGpuProvenance,
+) -> Result<(), EvidenceError> {
+    if nvidia.vendor != "NVIDIA"
+        || nvidia.logical_device_index != 0
+        || nvidia.total_vram_bytes == 0
+        || !nvidia_driver_version_supported(&nvidia.nvidia_driver_version)
+        || nvidia.offload.policy != "singleDeviceAllLayers"
+        || nvidia.offload.total_layers == 0
+        || nvidia.offload.offloaded_layers != nvidia.offload.total_layers
+    {
+        return invalid_provenance("NVIDIA device or offload proof is not supported");
+    }
+    for (value, field) in [
+        (&nvidia.device_name, "runtime.backend.nvidia.deviceName"),
+        (
+            &nvidia.nvidia_driver_version,
+            "runtime.backend.nvidia.nvidiaDriverVersion",
+        ),
+        (
+            &nvidia.cuda_driver_version,
+            "runtime.backend.nvidia.cudaDriverVersion",
+        ),
+        (
+            &nvidia.cuda_runtime_version,
+            "runtime.backend.nvidia.cudaRuntimeVersion",
+        ),
+        (
+            &nvidia.cuda_toolkit_version,
+            "runtime.backend.nvidia.cudaToolkitVersion",
+        ),
+        (
+            &nvidia.compute_capability,
+            "runtime.backend.nvidia.computeCapability",
+        ),
+    ] {
+        require_provenance_value(value, field)?;
+    }
+    let compute_capability_valid =
+        nvidia
+            .compute_capability
+            .split_once('.')
+            .is_some_and(|(major, minor)| {
+                !major.is_empty()
+                    && !minor.is_empty()
+                    && major.bytes().all(|byte| byte.is_ascii_digit())
+                    && minor.bytes().all(|byte| byte.is_ascii_digit())
+            });
+    if !compute_capability_valid {
+        return invalid_provenance("NVIDIA compute capability is malformed");
     }
     Ok(())
 }
@@ -1397,7 +1503,10 @@ mod tests {
         .expect("write resources");
     }
 
-    fn llama_plan(requests: u32) -> ResolvedExperiment {
+    fn llama_plan_for_target(
+        requests: u32,
+        target: benchplane_schema::LlamaCppTarget,
+    ) -> ResolvedExperiment {
         let experiment: Experiment = serde_json::from_value(serde_json::json!({
             "apiVersion": "benchplane/v1alpha1",
             "kind": "Experiment",
@@ -1420,6 +1529,15 @@ mod tests {
             }
         }))
         .expect("llama experiment");
+        let mut experiment = experiment;
+        let RuntimeSpec::LlamaCpp {
+            target: resolved_target,
+            ..
+        } = &mut experiment.spec.runtime
+        else {
+            unreachable!()
+        };
+        *resolved_target = target;
         crate::resolution::resolve_experiment(experiment).expect("resolve llama experiment")
     }
 
@@ -1465,8 +1583,36 @@ mod tests {
             .expect("write measurements");
     }
 
-    fn llama_provenance(generator: &str) -> AttemptProvenance {
+    fn llama_provenance_for_target(
+        generator: &str,
+        target: benchplane_schema::LlamaCppTarget,
+    ) -> AttemptProvenance {
         let mut provenance = valid_provenance();
+        let (identity, device_class, nvidia) = match target {
+            benchplane_schema::LlamaCppTarget::Cpu => {
+                (LLAMA_CPP_BACKEND_IDENTITY, "cpu", serde_json::Value::Null)
+            }
+            benchplane_schema::LlamaCppTarget::NvidiaCuda => (
+                LLAMA_CPP_CUDA_BACKEND_IDENTITY,
+                "nvidiaCuda",
+                serde_json::json!({
+                    "vendor": "NVIDIA",
+                    "deviceName": "Test NVIDIA GPU",
+                    "logicalDeviceIndex": 0,
+                    "totalVramBytes": 8589934592_u64,
+                    "nvidiaDriverVersion": "575.57.08",
+                    "cudaDriverVersion": "13.0",
+                    "cudaRuntimeVersion": "13.0",
+                    "cudaToolkitVersion": "13.0",
+                    "computeCapability": "8.9",
+                    "offload": {
+                        "policy": "singleDeviceAllLayers",
+                        "offloadedLayers": 31,
+                        "totalLayers": 31
+                    }
+                }),
+            ),
+        };
         provenance.software.runtime = serde_json::from_value(serde_json::json!({
             "kind": "llamaCpp",
             "generator": generator,
@@ -1481,9 +1627,10 @@ mod tests {
                 "nixStorePath": null
             },
             "backend": {
-                "identity": LLAMA_CPP_BACKEND_IDENTITY,
-                "deviceClass": "cpu",
-                "nixStorePath": null
+                "identity": identity,
+                "deviceClass": device_class,
+                "nixStorePath": null,
+                "nvidia": nvidia
             }
         }))
         .expect("llama provenance runtime");
@@ -1495,13 +1642,32 @@ mod tests {
     }
 
     fn llama_fixture_with_requests(label: &str, generator: &str, requests: u32) -> TestDirectory {
+        llama_fixture_for_target(
+            label,
+            generator,
+            requests,
+            benchplane_schema::LlamaCppTarget::Cpu,
+        )
+    }
+
+    fn llama_fixture_for_target(
+        label: &str,
+        generator: &str,
+        requests: u32,
+        target: benchplane_schema::LlamaCppTarget,
+    ) -> TestDirectory {
         let directory = copy_fixture(label);
-        let plan = llama_plan(requests);
+        let plan = llama_plan_for_target(requests, target);
         fs::write(
             directory.path.join("resolved-plan.json"),
             serde_json::to_vec_pretty(&plan).expect("serialize plan"),
         )
         .expect("write plan");
+        fs::write(
+            directory.path.join("experiment.yaml"),
+            serde_json::to_vec_pretty(&plan.experiment).expect("serialize source experiment"),
+        )
+        .expect("write source experiment");
 
         let mut manifest: EvidenceManifest = serde_json::from_slice(
             &fs::read(directory.path.join("manifest.json")).expect("read manifest"),
@@ -1565,7 +1731,10 @@ mod tests {
                 llama_measurement(generator, MeasurementPhase::Measured, 2, requests),
             ],
         );
-        write_provenance(&directory.path, &llama_provenance(generator));
+        write_provenance(
+            &directory.path,
+            &llama_provenance_for_target(generator, target),
+        );
         write_resources(&directory.path, &valid_resources());
         rewrite_checksums(&directory.path);
         directory
@@ -1828,6 +1997,171 @@ mod tests {
     }
 
     #[test]
+    fn verifies_bounded_nvidia_provenance_and_target_relationships() {
+        let valid = llama_fixture_for_target(
+            "nvidia-valid",
+            LLAMA_CPP_GENERATOR_VERSION,
+            2,
+            benchplane_schema::LlamaCppTarget::NvidiaCuda,
+        );
+        verify_evidence_bundle(&valid.path).expect("bounded NVIDIA evidence should verify");
+        let encoded = fs::read_to_string(valid.path.join("attempts/0001/provenance.json"))
+            .expect("read NVIDIA provenance");
+        for private_field in ["uuid", "serial", "pci", "busId"] {
+            assert!(!encoded.contains(private_field));
+        }
+
+        let historical_generator = llama_fixture_for_target(
+            "nvidia-historical-generator",
+            LLAMA_CPP_GENERATOR_VERSION_V1,
+            2,
+            benchplane_schema::LlamaCppTarget::NvidiaCuda,
+        );
+        assert!(matches!(
+            verify_evidence_bundle(&historical_generator.path),
+            Err(EvidenceError::InvalidMeasurements(_))
+        ));
+
+        for mode in [
+            "missing",
+            "device-class",
+            "logical-index",
+            "driver-version",
+            "compute-capability",
+            "offload",
+            "oversized",
+        ] {
+            let directory = llama_fixture_for_target(
+                &format!("nvidia-invalid-{mode}"),
+                LLAMA_CPP_GENERATOR_VERSION,
+                2,
+                benchplane_schema::LlamaCppTarget::NvidiaCuda,
+            );
+            let mut provenance: AttemptProvenance = serde_json::from_slice(
+                &fs::read(directory.path.join("attempts/0001/provenance.json"))
+                    .expect("read provenance"),
+            )
+            .expect("parse provenance");
+            let RuntimeProvenance::LlamaCpp { backend, .. } = &mut provenance.software.runtime
+            else {
+                unreachable!()
+            };
+            match mode {
+                "missing" => backend.nvidia = None,
+                "device-class" => backend.device_class = DeviceClass::Cpu,
+                "logical-index" => {
+                    backend
+                        .nvidia
+                        .as_mut()
+                        .expect("NVIDIA facts")
+                        .logical_device_index = 1
+                }
+                "driver-version" => {
+                    backend
+                        .nvidia
+                        .as_mut()
+                        .expect("NVIDIA facts")
+                        .nvidia_driver_version = "575.57.07".to_owned()
+                }
+                "compute-capability" => {
+                    backend
+                        .nvidia
+                        .as_mut()
+                        .expect("NVIDIA facts")
+                        .compute_capability = "not-a-capability".to_owned()
+                }
+                "offload" => {
+                    backend
+                        .nvidia
+                        .as_mut()
+                        .expect("NVIDIA facts")
+                        .offload
+                        .offloaded_layers = 0
+                }
+                "oversized" => {
+                    backend.nvidia.as_mut().expect("NVIDIA facts").device_name =
+                        "x".repeat(MAX_PROVENANCE_VALUE_BYTES + 1)
+                }
+                _ => unreachable!(),
+            }
+            write_provenance(&directory.path, &provenance);
+            rewrite_checksums(&directory.path);
+            assert!(matches!(
+                verify_evidence_bundle(&directory.path),
+                Err(EvidenceError::InvalidAttemptProvenance(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn gpu_comparison_requires_the_same_target_and_reports_gpu_context() {
+        let baseline = llama_fixture_for_target(
+            "gpu-comparison-baseline",
+            LLAMA_CPP_GENERATOR_VERSION,
+            2,
+            benchplane_schema::LlamaCppTarget::NvidiaCuda,
+        );
+        let mut candidate = llama_fixture_for_target(
+            "gpu-comparison-candidate",
+            LLAMA_CPP_GENERATOR_VERSION,
+            2,
+            benchplane_schema::LlamaCppTarget::NvidiaCuda,
+        );
+        rewrite_run_identity(&mut candidate, "run-019fe9ab-efa8-7d31-b631-25ab14491fb8");
+        let mut provenance: AttemptProvenance = serde_json::from_slice(
+            &fs::read(candidate.path.join("attempts/0001/provenance.json"))
+                .expect("read provenance"),
+        )
+        .expect("parse provenance");
+        let RuntimeProvenance::LlamaCpp { backend, .. } = &mut provenance.software.runtime else {
+            unreachable!()
+        };
+        backend
+            .nvidia
+            .as_mut()
+            .expect("NVIDIA context")
+            .nvidia_driver_version = "610.44.00".to_owned();
+        write_provenance(&candidate.path, &provenance);
+        rewrite_checksums(&candidate.path);
+
+        let comparison =
+            crate::comparison::compare_evidence_bundles(&baseline.path, &candidate.path)
+                .expect("matching GPU contracts compare");
+        assert!(comparison.compatible);
+        assert!(comparison.environment.iter().any(|field| {
+            field.field == "software.runtime.backend.nvidia.nvidiaDriverVersion"
+                && field.relationship == benchplane_schema::EnvironmentRelationship::Different
+        }));
+
+        let mut cpu = llama_fixture("gpu-vs-cpu", LLAMA_CPP_GENERATOR_VERSION);
+        rewrite_run_identity(&mut cpu, "run-019fe9ac-1234-7abc-8def-0123456789ab");
+        let incompatible = crate::comparison::compare_evidence_bundles(&baseline.path, &cpu.path)
+            .expect("both bundles verify");
+        assert!(!incompatible.compatible);
+        assert!(incompatible
+            .incompatibilities
+            .contains(&"target".to_owned()));
+        assert!(incompatible.requests.is_none());
+        assert!(incompatible.repetitions.is_none());
+        assert!(incompatible.attempt_resources.is_none());
+    }
+
+    #[test]
+    fn rejects_rechecksummed_original_experiment_that_does_not_resolve_to_plan() {
+        let directory = llama_fixture("original-experiment-mismatch", LLAMA_CPP_GENERATOR_VERSION);
+        fs::write(
+            directory.path.join("experiment.yaml"),
+            b"apiVersion: benchplane/v1alpha1\nkind: Experiment\nmetadata: { name: changed }\nspec:\n  provider: { kind: localFake }\n  runtime: { kind: localFake }\n  workload: { profile: changed, requests: 1 }\n  budget: { maximumCostUsd: 0 }\n",
+        )
+        .expect("replace original experiment");
+        rewrite_checksums(&directory.path);
+        assert!(matches!(
+            verify_evidence_bundle(&directory.path),
+            Err(EvidenceError::InvalidOriginalExperiment(_))
+        ));
+    }
+
+    #[test]
     fn comparison_rejects_historical_llama_v1_and_invalid_evidence() {
         let historical = llama_fixture("comparison-v1", LLAMA_CPP_GENERATOR_VERSION_V1);
         let mut current = llama_fixture("comparison-v2", LLAMA_CPP_GENERATOR_VERSION);
@@ -1889,6 +2223,11 @@ mod tests {
         plan = crate::resolution::resolve_experiment(plan.experiment)
             .expect("resolve changed valid plan");
         rewrite_resolved_plan(&candidate.path, &plan);
+        fs::write(
+            candidate.path.join("experiment.yaml"),
+            serde_json::to_vec_pretty(&plan.experiment).expect("serialize changed experiment"),
+        )
+        .expect("write changed experiment");
         rewrite_checksums(&candidate.path);
 
         let comparison =

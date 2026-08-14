@@ -45,6 +45,7 @@ fn into_execution_output(result: ChildExecution) -> ExecutionOutput {
     ExecutionOutput {
         measurements: result.measurements,
         resources: result.resources,
+        nvidia_gpu: None,
         terminal_state,
         failure: result.failure,
     }
@@ -75,6 +76,7 @@ fn execute_command(mut command: Command, config: CpuProbeConfig) -> ChildExecuti
         command,
         ChildProtocol {
             runtime_name: "CPU probe",
+            expected_metadata_records: 0,
             expected_records: expected_count,
             max_record_bytes: MAX_SERIALIZED_RECORD_BYTES,
             max_stdout_bytes: MAX_STDOUT_BYTES,

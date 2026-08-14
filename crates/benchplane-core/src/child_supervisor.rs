@@ -30,6 +30,7 @@ pub(crate) struct ExitCodeFailure {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ChildProtocol {
     pub runtime_name: &'static str,
+    pub expected_metadata_records: usize,
     pub expected_records: usize,
     pub max_record_bytes: usize,
     pub max_stdout_bytes: usize,
@@ -44,6 +45,7 @@ pub(crate) struct ChildProtocol {
 
 #[derive(Debug)]
 pub(crate) struct ChildExecution {
+    pub metadata: Vec<Vec<u8>>,
     pub measurements: Vec<MeasurementRecord>,
     pub resources: Option<ProcessResources>,
     pub failure: Option<FailureRecord>,
@@ -52,6 +54,7 @@ pub(crate) struct ChildExecution {
 impl ChildExecution {
     pub(crate) fn failed(failure: FailureRecord, resources: Option<ProcessResources>) -> Self {
         Self {
+            metadata: Vec::new(),
             measurements: Vec::new(),
             resources,
             failure: Some(failure),
@@ -62,6 +65,12 @@ impl ChildExecution {
 struct ReapedChild {
     status: ExitStatus,
     resources: Result<ProcessResources, String>,
+}
+
+struct CompletedChild {
+    reaped: ReapedChild,
+    metadata: Vec<Vec<u8>>,
+    measurements: Vec<MeasurementRecord>,
 }
 
 struct SupervisionFailure {
@@ -81,8 +90,9 @@ pub(crate) fn execute(
     validate: impl Fn(&MeasurementRecord, usize) -> Result<(), String>,
 ) -> ChildExecution {
     let accepted_bytes = protocol
-        .expected_records
-        .checked_mul(protocol.max_record_bytes)
+        .expected_metadata_records
+        .checked_add(protocol.expected_records)
+        .and_then(|records| records.checked_mul(protocol.max_record_bytes))
         .filter(|bytes| *bytes <= protocol.max_stdout_bytes)
         .ok_or_else(|| output_failure(protocol, "requested output exceeds its transport bound"));
     let accepted_bytes = match accepted_bytes {
@@ -132,11 +142,14 @@ pub(crate) fn execute(
     let stderr = stderr_thread.join().unwrap_or_default();
 
     match result {
-        Ok((reaped, measurements)) if reaped.status.success() => {
-            completed_success(protocol, reaped.resources, measurements)
-        }
-        Ok((reaped, _)) => {
-            let special = reaped.status.code().and_then(|code| {
+        Ok(completed) if completed.reaped.status.success() => completed_success(
+            protocol,
+            completed.reaped.resources,
+            completed.metadata,
+            completed.measurements,
+        ),
+        Ok(completed) => {
+            let special = completed.reaped.status.code().and_then(|code| {
                 protocol
                     .special_exit_codes
                     .iter()
@@ -149,13 +162,13 @@ pub(crate) fn execute(
                         protocol.exit_failure_code,
                         format!(
                             "packaged {} helper exited with {}",
-                            protocol.runtime_name, reaped.status
+                            protocol.runtime_name, completed.reaped.status
                         ),
                     )
                 });
             failed_after_reap(
                 failure(code, format!("{message}{}", format_stderr(&stderr))),
-                reaped.resources,
+                completed.reaped.resources,
             )
         }
         Err((mut failure, resources)) => {
@@ -171,16 +184,21 @@ pub(crate) fn execute(
 fn completed_success(
     protocol: ChildProtocol,
     resources: Result<ProcessResources, String>,
+    metadata: Vec<Vec<u8>>,
     measurements: Vec<MeasurementRecord>,
 ) -> ChildExecution {
-    if measurements.len() != protocol.expected_records {
+    if metadata.len() != protocol.expected_metadata_records
+        || measurements.len() != protocol.expected_records
+    {
         return failed_after_reap(
             output_failure(
                 protocol,
                 format!(
-                    "emitted {} records; expected {}",
+                    "emitted {} metadata and {} measurement records; expected {} and {}",
+                    metadata.len(),
                     measurements.len(),
-                    protocol.expected_records
+                    protocol.expected_metadata_records,
+                    protocol.expected_records,
                 ),
             ),
             resources,
@@ -188,6 +206,7 @@ fn completed_success(
     }
     match resources {
         Ok(resources) => ChildExecution {
+            metadata,
             measurements,
             resources: Some(resources),
             failure: None,
@@ -202,7 +221,8 @@ fn supervise(
     protocol: ChildProtocol,
     deadline: Instant,
     validate: impl Fn(&MeasurementRecord, usize) -> Result<(), String>,
-) -> Result<(ReapedChild, Vec<MeasurementRecord>), SupervisionFailure> {
+) -> Result<CompletedChild, SupervisionFailure> {
+    let mut metadata = Vec::with_capacity(protocol.expected_metadata_records);
     let mut measurements = Vec::with_capacity(protocol.expected_records);
     let mut stdout_done = false;
     let mut exit_status = None;
@@ -224,9 +244,13 @@ fn supervise(
         let wait = POLL_INTERVAL.min(deadline.saturating_duration_since(now));
         match stdout.recv_timeout(wait) {
             Ok(StdoutEvent::Line(line)) => {
-                if measurements.len() >= protocol.expected_records {
+                let emitted = metadata.len().saturating_add(measurements.len());
+                let expected = protocol
+                    .expected_metadata_records
+                    .saturating_add(protocol.expected_records);
+                if emitted >= expected {
                     return Err(supervision_failure(
-                        output_failure(protocol, "emitted excessive measurement records"),
+                        output_failure(protocol, "emitted excessive protocol records"),
                         &mut exit_status,
                     ));
                 }
@@ -245,6 +269,10 @@ fn supervise(
                         ),
                         &mut exit_status,
                     ));
+                }
+                if metadata.len() < protocol.expected_metadata_records {
+                    metadata.push(line);
+                    continue;
                 }
                 let record: MeasurementRecord = match serde_json::from_slice(&line) {
                     Ok(record) => record,
@@ -285,7 +313,11 @@ fn supervise(
         }
     }
 
-    Ok((exit_status.expect("child exit observed"), measurements))
+    Ok(CompletedChild {
+        reaped: exit_status.expect("child exit observed"),
+        metadata,
+        measurements,
+    })
 }
 
 fn supervision_failure(
@@ -505,6 +537,7 @@ mod tests {
 
     const TEST_PROTOCOL: ChildProtocol = ChildProtocol {
         runtime_name: "test",
+        expected_metadata_records: 0,
         expected_records: 0,
         max_record_bytes: 1,
         max_stdout_bytes: 1,
@@ -555,6 +588,7 @@ mod tests {
         let outcome = completed_success(
             TEST_PROTOCOL,
             Err("injected accounting failure".to_owned()),
+            Vec::new(),
             Vec::new(),
         );
         assert_eq!(

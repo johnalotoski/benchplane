@@ -15,7 +15,7 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -23,6 +23,15 @@ jobs:
           persist-credentials: false
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          extra_nix_config: |
+            extra-substituters = https://cache.nixos-cuda.org
+            extra-trusted-public-keys = cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M=
+      - name: Cache Nix store paths
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+        with:
+          use-flakehub: false
+          use-gha-cache: true
       - name: Run repository checks
         run: nix develop -c just check
       - name: Check flake

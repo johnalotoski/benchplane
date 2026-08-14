@@ -113,6 +113,9 @@ pub enum RuntimeSpec {
         work_units_per_token: u32,
     },
     LlamaCpp {
+        #[serde(default, skip_serializing_if = "LlamaCppTarget::is_cpu")]
+        #[schemars(default = "default_llama_cpp_target")]
+        target: LlamaCppTarget,
         #[serde(default = "default_llama_cpp_model")]
         model: String,
         #[serde(default = "default_llama_cpp_output_tokens")]
@@ -125,6 +128,24 @@ pub enum RuntimeSpec {
         #[serde(default)]
         arguments: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum LlamaCppTarget {
+    #[default]
+    Cpu,
+    NvidiaCuda,
+}
+
+impl LlamaCppTarget {
+    pub fn is_cpu(&self) -> bool {
+        *self == Self::Cpu
+    }
+}
+
+fn default_llama_cpp_target() -> LlamaCppTarget {
+    LlamaCppTarget::Cpu
 }
 
 fn default_llama_cpp_model() -> String {
@@ -380,6 +401,7 @@ impl Experiment {
         if let RuntimeSpec::LlamaCpp {
             model,
             output_tokens,
+            ..
         } = &self.spec.runtime
         {
             if model != LLAMA_CPP_MODEL_IDENTITY {
@@ -733,6 +755,7 @@ mod tests {
         experiment.metadata.name = "llama-cpp".to_owned();
         experiment.spec.provider = ProviderSpec::Local;
         experiment.spec.runtime = RuntimeSpec::LlamaCpp {
+            target: LlamaCppTarget::Cpu,
             model: LLAMA_CPP_MODEL_IDENTITY.to_owned(),
             output_tokens: 4,
         };
@@ -760,9 +783,24 @@ mod tests {
         assert_eq!(
             experiment.spec.runtime,
             RuntimeSpec::LlamaCpp {
+                target: LlamaCppTarget::Cpu,
                 model: LLAMA_CPP_MODEL_IDENTITY.to_owned(),
                 output_tokens: 4,
             }
+        );
+
+        let mut nvidia = experiment.clone();
+        let RuntimeSpec::LlamaCpp { target, .. } = &mut nvidia.spec.runtime else {
+            unreachable!()
+        };
+        *target = LlamaCppTarget::NvidiaCuda;
+        assert_eq!(nvidia.validate(), Ok(()));
+        let serialized = serde_json::to_value(&nvidia).expect("serialize NVIDIA target");
+        assert_eq!(serialized["spec"]["runtime"]["target"], "nvidiaCuda");
+        assert!(
+            serde_json::to_value(&experiment).expect("serialize CPU default")["spec"]["runtime"]
+                .get("target")
+                .is_none()
         );
     }
 
@@ -770,6 +808,7 @@ mod tests {
     fn llama_cpp_model_profile_concurrency_and_controls_are_exact() {
         let mut experiment = llama_cpp_experiment();
         experiment.spec.runtime = RuntimeSpec::LlamaCpp {
+            target: LlamaCppTarget::Cpu,
             model: "another-model".to_owned(),
             output_tokens: 0,
         };
@@ -789,6 +828,7 @@ mod tests {
         let mut inclusive = llama_cpp_experiment();
         inclusive.spec.workload.requests = 1;
         inclusive.spec.runtime = RuntimeSpec::LlamaCpp {
+            target: LlamaCppTarget::Cpu,
             model: LLAMA_CPP_MODEL_IDENTITY.to_owned(),
             output_tokens: 1,
         };

@@ -8,15 +8,9 @@ Benchplane is a reproducible AI-systems performance laboratory. Avoid narrowing 
 
 ## Current milestone
 
-Keep verified two-bundle llama.cpp comparison small and descriptive. `benchplane evidence compare` must:
+Keep the bounded NVIDIA llama.cpp slice concrete. The public `llamaCpp.target` distinguishes backward-compatible `cpu` from the single supported `nvidiaCuda` target. The NVIDIA package/helper exists only on `x86_64-linux`, requires host driver 575.57.08 or newer before backend initialization, selects logical CUDA device 0, uses no split mode, and requires observed all-layer offload before a run can succeed. Never expose device indices, offload counts, backend paths, CUDA environment, or general llama.cpp arguments.
 
-1. pass both inputs through the full bounded semantic evidence verifier before analysis;
-2. accept only successful, valid current local llama.cpp v2 bundles and compare concrete measurement-affecting model/runtime/workload dimensions rather than whole resolved-plan digests;
-3. calculate measured request and repetition statistics from raw non-warmup records, never copied summary numbers;
-4. keep request, repetition, independently initialized run, and whole-helper resource scopes explicit; and
-5. report recorded environment differences as context without claiming that they caused a performance delta.
-
-Use deterministic floor means and the existing nearest-rank percentile convention. Requests and repetitions inside one helper lifetime are not independent runs. Helper CPU time and peak RSS include initialization, model loading, warmups, measured work, and teardown and must never be attributed per request. Historical llama v1 remains verifiable but is not eligible for this first comparison contract. Do not add confidence intervals, significance tests, causal claims, run orchestration/groups, persistent comparison artifacts, generic analytics/equivalence abstractions, GPU/vLLM/AWS execution, or new lifecycle/evidence/experiment versions. Preserve the package-owned execution, supervision, provenance, resources, lifecycle, validity, and atomic publication contracts.
+Successful NVIDIA evidence must carry bounded attempt provenance for the package/runtime/model/backend plus device name, logical selection, CUDA-visible memory capacity, NVIDIA/CUDA identities, compute capability, and effective offload. Exclude UUIDs, serials, PCI identifiers, arbitrary inventory, and GPU telemetry. CPU/RSS resources remain exact host helper-process lifetime observations and are not GPU measurements. Comparison requires equal CPU/NVIDIA target, so CPU-versus-GPU is incompatible while matching GPU runs remain descriptively comparable. Preserve historical evidence, request/repetition measurement semantics, package-owned backend protection, exact supervision/accounting, lifecycle, validity, and atomic publication. Do not add GPU telemetry, multi-GPU, NCCL, ROCm, Vulkan, vLLM, AWS, orchestration, statistics, or accelerator/runtime abstractions.
 
 ## Boundaries
 
