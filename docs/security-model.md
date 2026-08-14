@@ -9,6 +9,12 @@ Credentials remain ambient and short-lived:
 
 Credentials must not appear in Nix derivations, the Nix store, OpenTofu variables/state, experiment YAML, logs, or public evidence.
 
+## CI binary-cache boundary
+
+Pull-request CI deliberately adds `https://cache.nixos-cuda.org` to, rather than replacing, Nix's normal substituters so CUDA package validation is practical on ephemeral GitHub-hosted runners. Nix accepts substituted store paths only when their signatures authenticate under the explicitly trusted NixOS CUDA cache public key. Trusting that key is itself a software supply-chain decision: Benchplane relies on the cache operator and key security for those binaries; signature verification does not make the operator untrusted. Pull requests can consume this read-only external cache but cannot upload arbitrary objects to it. Building the same large CUDA dependencies from source exceeded hosted-runner timeouts, while limiting the cache to trusted pushes would leave meaningful CUDA package checks impractical before merge.
+
+Magic Nix Cache complements that external cache by retaining otherwise uncached Nix store paths through GitHub Actions' cache service. It uses no Benchplane cache credential or repository secret, and pull-request-created entries follow GitHub's documented cache and ref scoping rather than a Benchplane-defined isolation guarantee. Ordinary `pull_request` jobs already execute proposed source on unprivileged, ephemeral GitHub-hosted runners with read-only repository permissions; Benchplane does not use `pull_request_target`, and cache use grants those jobs no privileged credential. These authenticated caches make CI practical but do not make builds fully reproducible or eliminate software supply-chain risk.
+
 Evidence checksums detect payload changes relative to the included checksum inventory and support internal consistency checks. New runs preserve bounded execution provenance for each attempt, but that self-reported context does not authenticate a publisher, host, or workflow, and a party able to replace the complete bundle can recompute the checksums. Signing and provenance attestations remain outside the current local execution scope.
 
 Evidence comparison is read-only and first subjects both bundles to the same path-safe, size-bounded checksum and semantic verifier. It never executes bundle content, starts a helper, contacts the network, mutates an input, or creates persistent comparison state. Its typed measurement data remains under the existing evidence file, line, record, and observation bounds.
